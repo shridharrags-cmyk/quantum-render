@@ -1,0 +1,24 @@
+name: render-quantum
+on: [workflow_dispatch, push]
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: pip install numpy pillow
+      - name: Render all frames in parallel
+        run: python render_parallel.py
+      - name: Encode + mux narration
+        run: |
+          ffmpeg -y -v error -framerate 24 -i frames/f%05d.png -i audio/narr_final.wav \
+            -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium -shortest \
+            -c:a aac -b:a 192k out/quantum_explainer.mp4
+          ls -la out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quantum-explainer
+          path: |
+            out/quantum_explainer.mp4
+            out/quantum_explainer.srt
+          retention-days: 7

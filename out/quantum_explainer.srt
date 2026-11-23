@@ -1,0 +1,43 @@
+1
+00:00:00,000 --> 00:00:11,714
+A quantum computer is not a faster computer. It's a different kind of machine, built on the strangest rules in physics, and it can solve problems that would take our best supercomputers longer than the universe has existed.
+
+2
+00:00:12,514 --> 00:00:33,308
+Every computer you've ever used thinks in bits. Each bit is a switch: on or off, one or zero. Your phone holds tens of billions of them, flipping millions of times a second, and that's been enough to put a rocket on the moon and the internet in your pocket. But we're hitting a wall. The switches are getting close to the size of single atoms, and at that scale, the classical rules stop working.
+
+3
+00:00:34,108 --> 00:00:37,730
+So instead of fighting the strangeness, a quantum computer uses it.
+
+4
+00:00:38,530 --> 00:01:00,961
+The quantum bit, the qubit, can be made from a single electron. An electron has a property called spin: measure it, and you'll always find it pointing up or down. Call that one and zero. But here's the part that breaks intuition: before you measure it, the electron is not secretly up, and it's not secretly down. It's in a delicate combination of both at once. Physicists call this superposition.
+
+5
+00:01:01,561 --> 00:01:10,663
+The classic picture is a spinning coin. While it spins, it isn't heads and it isn't tails. It's a blur of possibility. Only when it lands, when you measure it, does it commit.
+
+6
+00:01:11,463 --> 00:01:33,615
+Here's where it gets powerful. Two classical bits can hold one of four patterns at a time. Two qubits in superposition hold all four patterns simultaneously. Three qubits hold eight. Add qubits, and the states don't grow, they explode. Three hundred qubits can represent more states than there are atoms in the observable universe. That's not a faster version of your laptop. That's a new kind of parallelism, and it's why these machines matter.
+
+7
+00:01:34,415 --> 00:01:58,169
+But superposition alone isn't enough. If you just measure everything, you get random noise. The real magic is the second quantum resource: entanglement. Two entangled qubits are described by one shared state, no matter how far apart they sit. Measure one, and the other is instantly decided. Einstein called this spooky action at a distance, and it lets a quantum computer spread a single problem across all its qubits at once.
+
+8
+00:01:58,969 --> 00:02:23,280
+Then comes the choreography. Quantum operations don't just flip bits, they rotate the probabilities, nudging each answer's amplitude. An algorithm is designed so that the wrong answers interfere with each other and cancel out, like waves silencing each other in a pond, while the right answer reinforces itself, growing louder against the silence. You don't search the haystack. You tune the universe until the needle is the only thing left standing.
+
+9
+00:02:24,080 --> 00:02:40,334
+And the constraint that makes it hard: the moment you look, superposition collapses. The machine must stay almost perfectly isolated, colder than deep space, because the tiniest leak of heat or noise destroys the computation. Today's machines are fragile, and error correction eats most of their power.
+
+10
+00:02:41,134 --> 00:02:59,733
+This is why quantum computers won't replace your laptop. They will model molecules for new drugs, break and rebuild encryption, optimize vast systems, and simulate nature at its own scale. Because the classical world is a shadow of the quantum world. For the first time, we're building machines that don't just calculate about nature. They operate the way nature does.
+
+11
+00:03:00,333 --> 00:03:05,546
+That's the shift. Not faster computers. A new language, spoken natively, for the first time.
