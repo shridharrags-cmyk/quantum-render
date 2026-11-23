@@ -1,28 +1,58 @@
-name: render-quantum
-on: [workflow_dispatch, push]
+name: render
+on: workflow_dispatch
 jobs:
   render:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
         run: |
-          pip install numpy pillow
+          pip install -q numpy pillow
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
           ffmpeg -version | head -1
-      - name: Render all frames in parallel
+      - name: Render shard ${{ matrix.shard }}
+        env:
+          QFX_NSUB: "2"
+        run: python render_shard.py ${{ matrix.shard }} 8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: segment-${{ matrix.shard }}
+          path: seg_*.mp4
+          retention-days: 2
+
+  finalize:
+    needs: render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
         run: |
-          python render_parallel.py
-          COUNT=$(ls frames | wc -l)
-          echo "frames rendered: $COUNT / 4608"
-          if [ "$COUNT" -ne 4608 ]; then echo "::error frame count mismatch"; exit 1; fi
-      - name: Encode + mux narration
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: segment-*
+          merge-multiple: true
+          path: segments
+      - name: Concat + mux narration
         run: |
-          ffmpeg -y -v error -framerate 24 -i frames/f%05d.png -i audio/narr_final.wav \
-            -c:v libx264 -pix_fmt yuv420p -crf 18 -preset medium -shortest \
-            -c:a aac -b:a 192k out/quantum_explainer.mp4
-          ls -la out/
+          set -e
+          ls -la segments
+          rm -f list.txt
+          for f in $(ls segments/seg_*.mp4 | sort -t_ -k2 -n); do echo "file '$PWD/$f'" >> list.txt; done
+          cat list.txt
+          ffmpeg -y -v error -f concat -safe 0 -i list.txt \
+            -i audio/narr_final.wav \
+            -map 0:v -map 1:a \
+            -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
+            -c:a aac -b:a 192k -shortest -movflags +faststart \
+            out/quantum_explainer.mp4
+          ffprobe -v error -show_entries format=duration -of default=nw=1 out/quantum_explainer.mp4
       - uses: actions/upload-artifact@v4
         with:
           name: quantum-explainer

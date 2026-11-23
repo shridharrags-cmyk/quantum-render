@@ -1,0 +1,25 @@
+name: preview
+on: workflow_dispatch
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          pip install -q numpy pillow
+          python -c "import numpy, PIL; print('numpy', numpy.__version__, 'pillow', PIL.__version__)"
+      - name: Render stills
+        env:
+          QFX_NSUB: "1"
+        run: python stills.py
+      - name: Contact sheet
+        run: |
+          ls -la previews | head -30
+          ffmpeg -y -v error -pattern_type glob -i 'previews/*.png' \
+            -filter_complex "scale=640:-1,tile=4x6" -frames:v 1 previews/sheet.png || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: previews
+          path: previews/
+          retention-days: 5
