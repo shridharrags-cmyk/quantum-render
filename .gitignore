@@ -1,0 +1,6 @@
+out/*.mp4
+__pycache__/
+*.pyc
+seg_*.mp4
+list.txt
+segments/
