@@ -275,8 +275,13 @@ class Scene:
                 continue
             acc = np.bincount(idx, weights=w, minlength=n).reshape(H, W).astype(F32)
             # one-pixel halo so points read as round dots, not aliased pixels
-            acc = acc + 0.28 * (np.roll(acc, 1, 0) + np.roll(acc, -1, 0)
-                                + np.roll(acc, 1, 1) + np.roll(acc, -1, 1))
+            # round 3x3 splat: a bare pixel plus a cross and diagonals makes a
+            # plus sign that bloom turns into a square; this keeps dots circular
+            card = (np.roll(acc, 1, 0) + np.roll(acc, -1, 0)
+                    + np.roll(acc, 1, 1) + np.roll(acc, -1, 1))
+            diag = (np.roll(np.roll(acc, 1, 0), 1, 1) + np.roll(np.roll(acc, 1, 0), -1, 1)
+                    + np.roll(np.roll(acc, -1, 0), 1, 1) + np.roll(np.roll(acc, -1, 0), -1, 1))
+            acc = acc + 0.22 * card + 0.09 * diag
             flat[:, ch] += acc.reshape(-1)
 
     def line_dots(self, a, b, n, col, energy=1.0, blur=0.8, gain=1.0, r=0.0):
