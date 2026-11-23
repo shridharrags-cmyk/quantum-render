@@ -1,22 +1,23 @@
 """
-film.py — QUANTUM, a 192 s cinematic explainer.
+film.py — QUANTUM, a 192 s cinematic explainer (v3 art direction).
 
 Every pixel is a point of light in a 3-D scene: the reference videos' dotted
 visual language, rendered with perspective, lighting, defocus, motion blur,
 bloom, anamorphic streaks and film grain.
 
-Sections follow the narration (audio/timeline.json), so every cut lands on a
-sentence boundary.
+v3: the frame always has depth — a dotted data-grid sky, drifting bokeh stars,
+a receding floor — and every shot is built around one legible hero object with
+a light on its rim. No more empty black rectangles.
 """
 import math
 import os
 import numpy as np
 from qfx import (Cam, Scene, F32, TAU, rad, clamp, smoothstep, sstep, ease_out,
                  ease_in, ease_io, lerp, mix, norm, rot_x, rot_y, rot_z,
-                 sphere_shell, sphere_volume, torus, disc, grid3, bez, tube, wire_sphere,
-                 shade, blur_rgb, resize_f, bloom, grade, aces, chromatic,
-                 add_grain, finish, vignette, text_mask, put_mask, font,
-                 label, rule, corner_marks, text_points, shutter_samples,
+                 sphere_shell, sphere_volume, torus, disc, grid3, bez, tube,
+                 wire_sphere, shade, blur_rgb, resize_f, bloom, grade, aces,
+                 chromatic, add_grain, finish, vignette, text_mask, put_mask,
+                 font, label, rule, corner_marks, text_points, shutter_samples,
                  dust, dot_ground, jitter)
 
 W, H = 1280, 720          # scene render resolution (upscaled to 1080p)
@@ -35,8 +36,10 @@ TEAL   = np.array([0.12, 0.68, 0.72], F32)
 ICE    = np.array([0.72, 0.92, 1.00], F32)
 WHITE  = np.array([0.94, 0.98, 1.00], F32)
 INDIGO = np.array([0.34, 0.38, 0.95], F32)
+VIOLET = np.array([0.62, 0.38, 1.00], F32)
 AMBER  = np.array([1.00, 0.58, 0.18], F32)
 MINT   = np.array([0.55, 1.00, 0.82], F32)
+LIME   = np.array([0.72, 1.00, 0.42], F32)
 RED    = np.array([1.00, 0.30, 0.22], F32)
 VOID   = np.array([0.010, 0.016, 0.030], F32)
 
@@ -58,10 +61,30 @@ def kf(u, keys):
         a, va = keys[i]; b, vb = keys[i + 1]
         if u <= b:
             p = ease_io((u - a) / max(b - a, 1e-6))
-            if isinstance(va, (tuple, list, np.ndarray)):
-                return tuple(float(x + (y - x) * p) for x, y in zip(va, vb))
+            if isinstance(va, tuple):
+                return tuple(x + (y - x) * p for x, y in zip(va, vb))
             return va + (vb - va) * p
     return keys[-1][1]
+
+
+def fade(u, t0, t1, t2, t3):
+    return sstep(t0, t1, u) * (1.0 - sstep(t2, t3, u))
+
+
+def floor_pts(x0, x1, z0, z1, nx, nz, y, rng=None, jit=0.0):
+    xs = np.linspace(x0, x1, nx)
+    zs = np.linspace(z0, z1, nz)
+    X, Z = np.meshgrid(xs, zs)
+    P = np.stack([X.ravel(), np.full(X.size, y, F32), Z.ravel()], 1).astype(F32)
+    if jit and rng is not None:
+        P[:, 0] += rng.normal(0, jit, P.shape[0])
+        P[:, 2] += rng.normal(0, jit, P.shape[0])
+    return P
+
+
+def depth_energy(cam, P, base=0.5, near=1.0, far=9.0, floor=0.06):
+    d = cam.depth(P)
+    return base * np.clip(1.0 - (d - near) / (far - near), floor, 1.0)
 
 
 def screen_glow(S, cx, cy, r, color, inten=1.0, power=2.4):
@@ -72,6 +95,46 @@ def screen_glow(S, cx, cy, r, color, inten=1.0, power=2.4):
     S._buf(0.0)[...] += g * np.asarray(color, F32)[None, None, :] * inten
 
 
+def stage(S, t, gx=0.62, gy=0.44, gcol=None, gsize=0.40, gint=0.16,
+          stars=520, dustn=150, floor=None):
+    """Common background: navy gradient, dot-matrix sky, bokeh stars, glow."""
+    H, W = S.H, S.W
+    yy = np.linspace(0.0, 1.0, H, dtype=F32)[:, None, None]
+    top = np.array([0.030, 0.052, 0.120], F32)
+    bot = np.array([0.004, 0.008, 0.020], F32)
+    base = top * (1.0 - yy) + bot * yy
+    S.base = np.broadcast_to(base, (H, W, 3)).astype(F32).copy()
+
+    # dot-matrix paper, like the reference's dotted charts
+    step = 16
+    gy0, gx0 = np.mgrid[0:H:step, 0:W:step]
+    grid = np.zeros((H, W), F32)
+    grid[gy0.ravel(), gx0.ravel()] = 1.0
+    fadey = (1.0 - 0.55 * yy)
+    S.base += grid[..., None] * np.array([0.020, 0.034, 0.070], F32) * fadey
+    # brighter rule every 8th row, faint
+    S.base[::step * 8, :, :] += np.array([0.012, 0.020, 0.042], F32)
+
+    if gcol is not None:
+        screen_glow(S, W * gx, H * gy, W * gsize, gcol, gint)
+
+    if stars:
+        rng = np.random.default_rng(77)
+        P = dust(stars, rng, box=(26.0, 13.0, 26.0), t=t, speed=0.02)
+        P = P + np.array([0.0, 0.4, 0.0], F32)
+        cam = S.cam
+        d = cam.depth(P)
+        ok = d > 1.2
+        e = 0.30 * np.clip(1.25 - d / 22.0, 0.10, 1.0)
+        col = mix(ICE, CYAN, rng.random(P.shape[0]) * 0.7)
+        S.dots(P[ok], col[ok], e[ok], blur=2.6)
+    if dustn:
+        dust_layer(S, t, dustn, 2.6, energy=0.16)
+    if floor is not None:
+        f = dict(floor)
+        dot_ground(S.cam, S, t, **f)
+
+
 def dust_layer(S, t, n=260, blur=2.4, box=(9, 4, 9), energy=0.30, col=None):
     rng = np.random.default_rng(99)
     P = dust(n, rng, box=box, t=t, speed=0.03)
@@ -80,57 +143,135 @@ def dust_layer(S, t, n=260, blur=2.4, box=(9, 4, 9), energy=0.30, col=None):
     S.dots(P, col if col is not None else ICE * 0.8, e, blur=blur)
 
 
+
+def fib_sphere(n, R=1.0, jitter=0.0, rng=None):
+    """Evenly spaced points on a sphere (golden-angle spiral) — reads as a
+    dot-matrix surface rather than a fur of random speckle."""
+    i = np.arange(n, dtype=F32) + 0.5
+    ph = np.arccos(np.clip(1.0 - 2.0 * i / n, -1.0, 1.0))
+    th = (math.pi * (3.0 - math.sqrt(5.0))) * i
+    P = np.stack([np.cos(th) * np.sin(ph), np.cos(ph), np.sin(th) * np.sin(ph)], 1) * R
+    if jitter and rng is not None:
+        P = P + rng.normal(0, jitter, P.shape)
+    return P.astype(F32)
+
+
 def ring3d(n, R=1.0, r=0.02, tilt=0.0, yaw=0.0, rng=None):
     P = torus(n, R, r, rng)
     Rm = rot_y(yaw) @ rot_x(tilt)
     return P @ Rm.T
 
 
-def blink_energy(u, phases, freq=1.7, duty=0.45):
-    v = np.sin(u * freq * TAU + phases)
-    return np.where(v > math.cos(duty * math.pi), 1.0, 0.18).astype(F32)
+def glow_ball(S, c, r, col, energy=0.9, blur=0.9, n=40000, halo=3.0, back=0.10):
+    rng = np.random.default_rng(1234)
+    c = np.asarray(c, F32)
+    P = fib_sphere(n, r, 0.004, rng) + c
+    N = norm(P - c)
+    cc = shade(P, N, col * 0.45, [((c[0] + 1.6, c[1] + 2.4, c[2] + 1.2), ICE, 2.2)], S.cam.eye,
+               amb=0.10, rim=1.3)
+    S.dots(P, cc, energy * face_energy(N, S.cam.eye, c, back), blur=0.0)
+    S.dots(sphere_volume(n // 5, r * 1.7, rng) + c, col * 0.55, energy * 0.10, blur=blur + halo)
 
 
-# ================================================================== 01. HOOK
+def lattice(nx, ny, nz, sx, sy, sz, rng=None, per=None):
+    """Nodes plus every grid line of a 3-D box, sampled densely enough that
+    each line reads as a dotted wire rather than a handful of specks."""
+    xs = np.linspace(-sx * 0.5, sx * 0.5, nx)
+    ys = np.linspace(-sy * 0.5, sy * 0.5, ny)
+    zs = np.linspace(-sz * 0.5, sz * 0.5, nz)
+    X, Y, Z = np.meshgrid(xs, ys, zs)
+    nodes = np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1).astype(F32)
+    step = 0.020
+    nxs = max(int(sx / step), 8)
+    nys = max(int(sy / step), 8)
+    nzs = max(int(sz / step), 8)
+    segs = []
+    for y in ys:
+        for z in zs:
+            segs.append(np.stack([np.linspace(xs[0], xs[-1], nxs), np.full(nxs, y),
+                                  np.full(nxs, z)], 1))
+    for x in xs:
+        for z in zs:
+            segs.append(np.stack([np.full(nys, x), np.linspace(ys[0], ys[-1], nys),
+                                  np.full(nys, z)], 1))
+    for x in xs:
+        for y in ys:
+            segs.append(np.stack([np.full(nzs, x), np.full(nzs, y),
+                                  np.linspace(zs[0], zs[-1], nzs)], 1))
+    edges = np.concatenate(segs).astype(F32)
+    return nodes, edges
+
+
+def face_energy(N, eye, C, back=0.10):
+    """Dim the far hemisphere so a point sphere reads as solid, not glass."""
+    V = norm(np.asarray(eye, F32)[None, :] - np.asarray(C, F32)[None, :])
+    front = np.sum(np.asarray(N, F32) * V, 1) > -0.05
+    return np.where(front, 1.0, back).astype(F32)
+
+
+def braid(a, b, n, turns=3.0, amp=0.20):
+    s = np.linspace(0.0, 1.0, n)
+    a = np.asarray(a, F32); b = np.asarray(b, F32)
+    base = a[None, :] * (1.0 - s)[:, None] + b[None, :] * s[:, None]
+    d = norm(b - a)
+    e1 = norm(np.cross(d, np.array([0.0, 1.0, 0.0], F32)))
+    e2 = np.cross(d, e1)
+    ph = turns * TAU * s
+    p1 = base + amp * (np.cos(ph)[:, None] * e1 + np.sin(ph)[:, None] * e2)
+    p2 = base + amp * (np.cos(ph + math.pi)[:, None] * e1 + np.sin(ph + math.pi)[:, None] * e2)
+    return p1, p2, s
+
+
+# ==================================================================== 01. HOOK
 def sc_hook(u, t):
-    cam = Cam(W, H, eye=(0.0, 0.35, kf(u, [(0, 2.0), (5.0, 3.5), (11.0, 5.0)])),
-              target=(0.0, 0.05, 0.0), fov=40, roll=0.02 * math.sin(u * 0.3))
+    cam = Cam(W, H,
+              eye=(kf(u, [(0, 0.55), (12, 0.30)]), kf(u, [(0, 0.34), (12, 0.18)]),
+                   kf(u, [(0, 3.95), (12, 3.25)])),
+              target=(kf(u, [(0, -0.70), (12, -0.66)]), 0.0, 0.0), fov=38,
+              roll=rad(1.4) * math.sin(u * 0.34))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.64, gy=0.44, gcol=TEAL, gsize=0.34, gint=0.20)
     rng = jitter(1)
-    screen_glow(S, W * 0.5, H * 0.52, W * 0.42, INDIGO * 0.5 + CYAN * 0.15, 0.10)
-    dot_ground(cam, S, t, n=6300, y=-1.35, extent=11, col=TEAL * 0.7, energy=0.22, blur=1.6)
+    Rm = rot_y(u * 0.30) @ rot_x(rad(16) + 0.06 * math.sin(u * 0.5))
+    R = 0.90
 
-    # the point of light -> a shell of 160k
-    birth = sstep(1.2, 3.4, u)
-    n = 70000 + int(90000 * birth)
-    P0 = sphere_shell(n, 0.55, 0.012, rng)
-    spin = u * 0.35
-    P = P0 @ rot_y(spin).T + np.array([0.62, 0.02, 0.0], F32)
-    # slow breathing
-    P = P * (1.0 + 0.03 * math.sin(u * 1.4))
-    # detonation: particles start collapsed and fly out
-    q = ease_out(clamp((u - 1.2) / 2.6), 3.0)
-    P = P * (0.02 + 0.98 * q)
-    N = norm(P)
-    lights = [((2.6, 2.4, 3.2), ICE, 2.4), ((-2.4, -1.0, 1.8), AMBER, 0.7)]
-    col = shade(P, N, CYAN * 0.26 + TEAL * 0.10, lights, cam.eye, amb=0.035,
-                rim=0.55, spec=0.45, fog=VOID * 2.0, fog_density=0.02)
-    S.dots(P, col, 0.42, blur=0.9)
-    # bright core that collapses
-    core = sphere_volume(int(3000 * (1 - sstep(2.8, 4.2, u))) + 1, 0.06, rng)
-    S.dots(core, ICE, 1.4, blur=2.2)
-    S.dots(core, WHITE, 0.9, blur=0.8)
-    # orbital ring
-    ring = ring3d(24000, 0.92, 0.012, tilt=rad(18), yaw=u * 0.6, rng=rng) + np.array([0.62, 0, 0], F32)
-    rc = shade(ring, norm(ring), TEAL, [((0, 2, 2), ICE, 1.4)], cam.eye, amb=0.2, rim=1.0)
-    S.dots(ring, rc, 0.42, blur=0.9)
-    # second ring
-    ring2 = ring3d(14000, 1.18, 0.010, tilt=rad(-24), yaw=-u * 0.4, rng=rng) + np.array([0.62, 0, 0], F32)
-    S.dots(ring2, TEAL * 0.85, 0.22, blur=1.5)
-    # unseen machinery: a vast shell of far stars
-    stars = sphere_shell(9000, 8.0, 0.35, rng)
-    S.dots(stars, ICE * 0.5, 0.12, blur=1.4)
-    dust_layer(S, t, 200, 2.8)
+    # electron cloud: a bright rim with a hollow, lit from the upper left
+    Pc = fib_sphere(82000, R, 0.006, rng) @ Rm.T
+    Nc = norm(Pc)
+    cc = shade(Pc, Nc, TEAL * 0.30,
+               [((-1.4, 2.2, 2.4), CYAN, 2.1), ((2.2, -0.6, 1.2), VIOLET, 0.9)],
+               cam.eye, amb=0.10, rim=1.25, spec=0.35)
+    S.dots(Pc, cc, 0.20 * face_energy(Nc, cam.eye, np.zeros(3, F32)), blur=1.0)
+
+    # the model of the atom: three orbits + a wire shell
+    for j, (tilt, yaw, energy) in enumerate([(rad(74), u * 0.42, 0.55),
+                                             (rad(28), u * 0.42 + 2.1, 0.50),
+                                             (rad(-52), u * 0.42 + 4.2, 0.46)]):
+        orb = ring3d(5200, R * 1.10, 0.006, tilt=tilt, yaw=yaw, rng=rng)
+        S.dots(orb, mix(CYAN, VIOLET, 0.25 * j), energy * 0.7, blur=0.0)
+    Wp = wire_sphere(9, 12, R, 520) @ Rm.T
+    S.dots(Wp, CYAN * 0.9, 0.34, blur=0.0)
+
+    # electrons with comet trails
+    for j in range(3):
+        a0 = u * (1.1 + 0.17 * j) + j * 2.1
+        tr = np.linspace(a0 - 1.15, a0, 520)
+        rr = R * 1.10
+        tilt = [rad(74), rad(28), rad(-52)][j]
+        yaw = u * 0.42 + [0.0, 2.1, 4.2][j]
+        Rm2 = rot_y(yaw) @ rot_x(tilt)
+        P = np.stack([rr * np.cos(tr), np.zeros_like(tr), rr * np.sin(tr)], 1) @ Rm2.T
+        fade_e = np.linspace(0.05, 1.0, len(tr)) ** 2
+        S.dots(P, mix(CYAN, WHITE, 0.4), 0.95 * fade_e, blur=1.1)
+        core = sphere_shell(3200, 0.035, 0.0, rng) + P[-1]
+        S.dots(core, WHITE, 2.4, blur=0.8)
+        S.dots(sphere_volume(1200, 0.14, rng) + P[-1], CYAN, 0.25, blur=3.0)
+
+    # nucleus: a hot cluster
+    S.dots(sphere_shell(26000, 0.070, 0.03, rng), WHITE, 1.15, blur=0.0)
+    S.dots(sphere_volume(16000, 0.28, rng), CYAN * 0.8, 0.22, blur=3.4)
+    S.dots(sphere_volume(4000, 0.09, rng), ICE, 0.9, blur=1.2)
+    dust_layer(S, t, 120, 2.6, energy=0.14)
     return S
 
 
@@ -148,62 +289,64 @@ def ov_hook(f, u, t, dur):
              124, 626, CYAN * 0.9, sub * 0.85, glow=0.25)
 
 
-# ================================================================== 02. BITS
+# =================================================================== 02. BITS
 def sc_bits(u, t):
-    fwd = kf(u, [(0, 0.0), (13, 6.0), (20.5, 10.5)])
-    cam = Cam(W, H, eye=(kf(u, [(0, 0.35), (13, -0.15), (20.5, 0.0)]),
-                          kf(u, [(0, 1.15), (13, 0.85), (20.5, 0.62)]),
-                          kf(u, [(0, 3.2), (13, 1.4), (20.5, 0.9)])),
-              target=(0.0, kf(u, [(0, 0.05), (13, 0.15), (20.5, 0.30)]), 0.0 - fwd),
-              fov=52, roll=rad(0.8) * math.sin(u * 0.35))
+    fwd = kf(u, [(0, 0.0), (13, 2.2), (20.5, 3.6)])
+    cam = Cam(W, H,
+              eye=(kf(u, [(0, 0.30), (13, -0.10), (20.5, 0.10)]),
+                   kf(u, [(0, 1.85), (13, 1.20), (20.5, 0.55)]),
+                   kf(u, [(0, 3.60), (13, 2.80), (20.5, 1.55)])),
+              target=(0.0, kf(u, [(0, 0.00), (13, -0.10), (20.5, -0.35)]), -1.6 - fwd),
+              fov=52, roll=rad(0.7) * math.sin(u * 0.35))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.64, gy=0.40, gcol=AMBER * 0.5 + TEAL * 0.5, gsize=0.40, gint=0.13,
+          floor=None)
     rng = jitter(2)
-    screen_glow(S, W * 0.5, H * 0.40, W * 0.55, TEAL * 0.55, 0.14)
 
-    # ---- the bit field: thousands of switches, each blinking on its own clock
-    gx = np.arange(-14.0, 14.0, 0.30)
-    gz = np.arange(-23.0, 1.6, 0.30)
-    X, Z = np.meshgrid(gx, gz)
-    P = np.stack([X.ravel(), np.full(X.size, 0.0, F32), Z.ravel()], 1)
-    ph = rng.random(len(P)) * TAU
-    rate = 0.7 + 1.5 * rng.random(len(P))
-    on = (np.sin(u * rate * TAU + ph) > 0.15).astype(F32)
-    on = 0.10 + 0.90 * on * (0.55 + 0.45 * on)
-    rare = rng.random(len(P)) < 0.035
-    col = np.where(rare[:, None], AMBER, np.where((rng.random(len(P)) < 0.15)[:, None], ICE, CYAN))
-    e = on * np.clip(1.85 - 0.045 * cam.depth(P), 0.25, 1.85)
-    S.dots(P, col, e * 0.85, blur=1.25)
+    # ---- switch field: cells of three dots, blinking to their own clock
+    nx, nz = 30, 60
+    xs = np.linspace(-4.6, 4.6, nx)
+    zs = np.linspace(-9.0, 0.4, nz)
+    X, Z = np.meshgrid(xs, zs)
+    X = X.ravel(); Z = Z.ravel()
+    y = -0.98
+    phase = (X * 1.7 + Z * 0.9)
+    on = 0.5 + 0.5 * np.sin(t * 2.4 + phase * 1.3)
+    on = on ** 2
+    # cell centre
+    P0 = np.stack([X, np.full(X.size, y, F32), Z], 1)
+    e0 = 0.22 + 1.55 * on
+    S.dots(P0, mix(TEAL, CYAN, on), e0, blur=1.0)
+    # gate dots either side
+    for s in (-1, 1):
+        P1 = P0 + np.array([s * 0.075, 0.0, 0.0], F32)
+        S.dots(P1, mix(TEAL * 0.5, AMBER, on), 0.28 + 1.25 * on, blur=1.05)
 
-    # perspective rails: two brighter lines of dots running to the horizon
-    for sx in (-3.2, 3.2):
-        rail = np.stack([np.full(900, sx, F32), np.full(900, 0.02, F32),
-                         np.linspace(1.0, -22, 900)], 1)
-        S.dots(rail, ICE, 0.55, blur=1.6)
+    # rails down the field, and a bright horizon
+    for x in (-4.75, 4.75):
+        rp = np.stack([np.full(320, x), np.full(320, y), np.linspace(-9.2, 0.5, 320)], 1).astype(F32)
+        S.dots(rp, TEAL * 0.7, 0.30, blur=1.3)
+    hz = np.linspace(-6.5, 6.5, 900)
+    S.dots(np.stack([hz, np.full(900, y), np.full(900, -9.4, F32)], 1), AMBER,
+           0.30, blur=3.2)
 
-    # ---- a wall of states at the far edge
-    wx = np.arange(-13, 13, 0.26)
-    wy = np.arange(0.0, 8.0, 0.26)
-    WX, WY = np.meshgrid(wx, wy)
-    WP = np.stack([WX.ravel(), WY.ravel(), np.full(WX.size, -21.5, F32)], 1)
-    won = (np.sin(u * 1.6 + rng.random(len(WP)) * TAU) > 0.35).astype(F32)
-    S.dots(WP, TEAL * 0.95, (0.16 + 0.75 * won) * 0.7, blur=1.4)
-
-    # ---- dive into one cell: the atom
-    atom_a = sstep(17.0, 20.0, u)
-    if atom_a > 0:
-        ap = np.array([0.0, 0.55, kf(u, [(17, -8.2), (21, -7.2)])], F32)
-        c = sphere_volume(int(14000 * atom_a) + 1, 0.075, rng) + ap
-        S.dots(c, WHITE, 1.7 * atom_a, blur=1.5)
-        sh1 = sphere_shell(int(42000 * atom_a) + 1, 0.62, 0.02, rng)
-        j = 1.0 + 0.03 * np.sin(u * 8.0 + np.arange(len(sh1)) * 0.013)[:, None]
-        sh1 = sh1 * j + ap
-        S.dots(sh1, CYAN * 0.95, 0.55 * atom_a, blur=1.0)
-        sh2 = sphere_shell(int(30000 * atom_a) + 1, 1.02, 0.05, rng) + ap
-        S.dots(sh2, TEAL * 0.8, 0.32 * atom_a, blur=1.3)
-        # the wall recedes behind it, trembling
-        S.dots(WP, AMBER * 0.7, 0.35 * atom_a, blur=1.6)
-    dust_layer(S, t, 190, 2.8, energy=0.22)
+    # ---- the dive: one switch grows into an atom
+    dive = sstep(15.6, 19.4, u)
+    if dive > 0.01:
+        c = np.array([0.15, -0.62, -2.6], F32)
+        S.dots(sphere_shell(int(26000 * dive) + 10, 0.10 + 0.34 * dive, 0.03, rng) + c,
+               WHITE, 0.9 + 1.4 * dive, blur=0.8)
+        if dive > 0.35:
+            q = (dive - 0.35) / 0.65
+            Wp = wire_sphere(7, 10, 0.12 + 0.44 * q, 420) + c
+            S.dots(Wp, CYAN, 0.6 * q, blur=0.9)
+            for j in range(2):
+                orb = ring3d(9000, 0.16 + 0.46 * q, 0.008, rad(70) * (1 if j else -1),
+                             u * 0.8 + j * 2.0, rng) + c
+                S.dots(orb, CYAN if j == 0 else AMBER, 0.55 * q, blur=1.0)
+    dust_layer(S, t, 150, 3.0, energy=0.16)
     return S
+
 
 def ov_bits(f, u, t, dur):
     a = fade(u, 0.5, 1.5, 20.0, 21.4)
@@ -223,33 +366,34 @@ def ov_bits(f, u, t, dur):
              118, 540, ICE, t3, glow=0.35)
 
 
-# ============================================================== 03. USE IT
+# ================================================================= 03. USE IT
 def sc_useit(u, t):
-    cam = Cam(W, H, eye=(kf(u, [(0, 0.0), (3.6, -1.4)]), 0.25, kf(u, [(0, 3.2), (3.6, 2.4)])),
+    cam = Cam(W, H, eye=(kf(u, [(0, 0.15), (3.6, -1.9)]), 0.30,
+                         kf(u, [(0, 3.30), (3.6, 3.90)])),
               target=(0.0, 0.0, 0.0), fov=42, roll=rad(-2) * u / 3.6)
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.62, gy=0.46, gcol=CYAN, gsize=0.32, gint=0.22)
     rng = jitter(3)
-    screen_glow(S, W * 0.5, H * 0.5, W * 0.3, CYAN * 0.6, 0.16)
-    # atom core condenses then explodes into an ordered orbit
-    a = sstep(0.0, 0.7, u)
-    c = sphere_volume(9000, 0.05, rng)
-    S.dots(c, WHITE, 1.5, blur=1.6)
-    burst = ease_out(clamp((u - 0.35) / 1.4), 2.6)
-    n = 90000
-    P = sphere_shell(n, 0.35, 0.02, rng)
-    P = P * (1.0 + 2.2 * burst)
-    P = P @ rot_x(rad(62)).T @ rot_z(u * 0.9).T
-    S.dots(P, mix(CYAN, AMBER, 0.25 * burst), 0.5 * (1 - 0.55 * burst), blur=1.1)
-    # a clean bright orbit ring
-    R = ring3d(50000, 1.25, 0.012, tilt=rad(66), yaw=u * 1.5, rng=rng)
-    S.dots(R, ICE, 0.65, blur=0.9)
-    # shockwave
-    sw = clamp(u / 1.8)
-    if sw < 1.0:
-        w = 0.55 + sw * 3.2
-        swP = ring3d(26000, w, 0.01, tilt=rad(70), yaw=0.3, rng=rng)
-        S.dots(swP, mix(WHITE, TEAL, sw), 0.9 * (1 - sw) ** 2, blur=2.4)
-    dust_layer(S, t, 180, 2.6)
+    a = sstep(0.0, 0.75, u)
+    q = ease_io(clamp((u - 0.55) / 2.0))
+
+    # order condensing out of a single point
+    nodes, edges = lattice(7, 7, 7, 1.75, 1.75, 1.75)
+    R = np.linalg.norm(nodes, axis=1, keepdims=True)
+    from_pt = norm(nodes) * (0.05 + 1.9 * (1 - q))
+    P = from_pt * (1 - q) + nodes * q
+    col = mix(VIOLET, CYAN, clamp(q))
+    S.dots(P, col, 0.9 * (0.4 + 0.6 * q), blur=0.9)
+    E = edges * (0.25 + 0.75 * q)
+    S.dots(E, CYAN * 0.85, 0.55 * q + 0.10, blur=1.0)
+    # hot core that seeds it
+    S.dots(fib_sphere(2600, 0.045 + 0.03 * (1 - q), 0.003, rng), ICE, 0.48, blur=0.0)
+    S.dots(sphere_volume(9000, 0.42, rng), CYAN * 0.7, 0.10, blur=3.0)
+    # flying sparks on the front of the wave
+    n = 1200
+    Ps = sphere_shell(n, 0.25 + 2.5 * q, 0.05, rng)
+    S.dots(Ps, ICE, 0.20 * (1 - q), blur=1.4)
+    dust_layer(S, t, 120, 2.6, energy=0.16)
     return S
 
 
@@ -263,9 +407,8 @@ def ov_useit(f, u, t, dur):
              124, 620, CYAN, l2 * 0.8, glow=0.2)
 
 
-# ================================================================= 04. QUBIT
+# ================================================================== 04. QUBIT
 def spinning_coin(n, R, thick, rng):
-    """A coin as a point cloud, shaded front/back/rim. Returns P, N."""
     nf = n // 2
     a = rng.random(nf) * TAU; rr = R * np.sqrt(rng.random(nf))
     front = np.stack([rr * np.cos(a), rr * np.sin(a), np.full(nf, thick / 2)], 1)
@@ -281,87 +424,73 @@ def spinning_coin(n, R, thick, rng):
 
 
 def sc_qubit(u, t):
-    ex = kf(u, [(0, 0.95), (8, -0.75), (14, 0.10), (23, 0.35)])
-    ey = kf(u, [(0, 0.30), (8, 0.50), (23, 0.16)])
-    ez = kf(u, [(0, 4.25), (8, 3.80), (14, 4.10), (23, 3.65)])
-    cam = Cam(W, H, eye=(ex, ey, ez), target=(kf(u, [(0, 0.30), (8, -0.10), (23, 0.18)]), 0.03, 0.0),
-              fov=40, roll=rad(1.1) * math.sin(u * 0.22))
+    # A: the Bloch sphere (0 - 8.7)
+    # B: not up / not down / both (8.7 - 15.3)
+    # C: the coin (15.3 - 23.0)
+    if u < 15.3:
+        cam = Cam(W, H,
+                  eye=(kf(u, [(0, 0.30), (15, 0.55)]), kf(u, [(0, 0.24), (15, 0.34)]),
+                       kf(u, [(0, 4.25), (15, 3.95)])),
+                  target=(-0.62, 0.0, 0.0), fov=40, roll=rad(1.2) * math.sin(u * 0.3))
+        S = Scene(W, H, cam)
+        stage(S, t, gx=0.64, gy=0.44, gcol=TEAL, gsize=0.34, gint=0.18)
+        rng = jitter(4)
+        R = 1.00
+        # the sphere as a wire model on a dark glass shell
+        WS = wire_sphere(11, 16, R, 620)
+        S.dots(WS, CYAN * 0.85, 0.30, blur=0.0)
+        equator = ring3d(11000, R, 0.004, tilt=0, yaw=0, rng=rng)
+        S.dots(equator, ICE * 0.8, 0.50, blur=0.0)
+
+        # vertical axis
+        S.dots(np.stack([np.zeros(200), np.linspace(-R * 1.35, R * 1.35, 200), np.zeros(200)], 1),
+               ICE * 0.5, 0.35, blur=1.0)
+        for yy in (-R, R):
+            S.dots(sphere_shell(2200, 0.035, 0.0, rng) + np.array([0, yy, 0], F32), WHITE, 1.4, blur=0.9)
+
+        # state vector: swings from up to the equator plane, then keeps tilting
+        th = math.radians(lerp(12.0, 108.0, ease_io(clamp(u / 8.6))))
+        ph = u * 0.55 + 0.4
+        tip = np.array([R * math.sin(th) * math.cos(ph), R * math.cos(th),
+                        R * math.sin(th) * math.sin(ph)], F32)
+        line = np.linspace(0, 1, 900)[:, None] * tip[None, :]
+        S.dots(line, ICE, 0.85, blur=0.85)
+        S.dots(sphere_shell(3600, 0.045, 0.0, rng) + tip, WHITE, 2.0, blur=0.9)
+
+        # probability fan: the whole band of states the vector could take
+        if u > 8.0:
+            q = sstep(8.0, 11.0, u)
+            for k in range(9):
+                th2 = math.radians(20 + k * 18)
+                tipp = np.array([R * math.sin(th2) * math.cos(ph), R * math.cos(th2),
+                                 R * math.sin(th2) * math.sin(ph)], F32)
+                ln = np.linspace(0, 1, 300)[:, None] * tipp[None, :]
+                S.dots(ln, mix(CYAN, AMBER, k / 8), 0.30 * q, blur=1.1)
+        S.dots(sphere_volume(9000, 1.6, rng), TEAL, 0.035, blur=4.0)
+        dust_layer(S, t, 120, 2.6, energy=0.15)
+        return S
+
+    # ---- C: the coin
+    cam = Cam(W, H, eye=(0.25, 0.12, kf(u, [(15.3, 2.75), (23, 2.30)])),
+              target=(-0.45, 0.0, 0.0), fov=40, roll=rad(1.0) * math.sin(u * 0.5))
     S = Scene(W, H, cam)
-    rng = jitter(4)
-    screen_glow(S, W * 0.60, H * 0.46, W * 0.30, CYAN * 0.45, 0.15)
-    dot_ground(cam, S, t, n=6400, y=-1.30, extent=9, col=TEAL * 0.6, energy=0.30, blur=1.7)
-    dust_layer(S, t, 240, 2.9, energy=0.28)
-
-    base = np.array([kf(u, [(0, 0.0), (8, 0.30), (14, 0.55), (23, 0.35)]),
-                     kf(u, [(0, 0.18), (23, 0.02)]), 0.0], F32)
-    sphere_a = 1.0 - sstep(13.4, 14.6, u)
-
-    if sphere_a > 0:
-        # faint volume so the globe has body
-        fill = sphere_shell(42000, 0.78, 0.03, rng) + base
-        fc = shade(fill, norm(fill - base), CYAN * 0.16 + TEAL * 0.06,
-                   [((2.2, 2.4, 3.0), ICE, 1.6)], cam.eye, amb=0.02, rim=0.25)
-        S.dots(fill, fc, 0.30 * sphere_a, blur=1.0)
-        # the wireframe globe: latitude + meridians
-        wire = wire_sphere(9, 16, 0.78, per=520) + base
-        S.dots(wire, CYAN, 0.62 * sphere_a, blur=0.95)
-        # bright equator
-        eq = ring3d(7000, 0.785, 0.004, tilt=0, yaw=0, rng=rng) + base
-        S.dots(eq, ICE, 0.85 * sphere_a, blur=0.9)
-        # poles
-        for sy in (-1, 1):
-            S.dots(sphere_volume(900, 0.018, rng) + base + np.array([0, 0.785 * sy, 0], F32),
-                   WHITE, 1.5 * sphere_a, blur=1.8)
-
-        # state vector: one arrow, then a fan of every possibility
-        split = sstep(7.4, 9.2, u)
-        vec_a = sphere_a * (1 - 0.0 * split)
-        ang0 = rad(62)
-        wob = 0.10 * math.sin(u * 0.9)
-        th = ang0 + wob
-        if split > 0.01:
-            m = 90
-            ths = np.linspace(rad(18), rad(162), m)
-            for j in range(m):
-                q = ths[j]
-                tip = base + np.array([0.78 * math.sin(q), 0.78 * math.cos(q), 0.0], F32)
-                seg = np.linspace(0, 1, 40)[:, None]
-                line = base + (tip - base) * seg
-                w = 1.0 if (j % 12 == 0) else 0.35
-                S.dots(line, mix(AMBER, CYAN, j / m), 0.30 * split * w, blur=1.2)
-        tip = base + np.array([0.78 * math.sin(th), 0.78 * math.cos(th), 0.0], F32)
-        seg = np.linspace(0, 1, 700)[:, None]
-        vec = base + (tip - base) * seg
-        S.dots(vec, mix(WHITE, AMBER, 0.25 * split), 0.95 * vec_a, blur=1.0)
-        S.dots(sphere_volume(1600, 0.035, rng) + tip, WHITE, 1.4 * vec_a, blur=1.8)
-        # arrow head
-        ah = sphere_volume(700, 0.022, rng) + tip
-        S.dots(ah, AMBER, 1.0 * vec_a, blur=1.4)
-        # spin precession ring around the arrow
-        prec = ring3d(9000, 0.83, 0.006, tilt=rad(70), yaw=u * 1.3, rng=rng) + base
-        S.dots(prec, TEAL, 0.30 * sphere_a, blur=1.2)
-
-    # ---- the coin, second half
-    coin_a = sstep(14.0, 15.2, u) * (1 - sstep(19.4, 20.2, u))
-    if coin_a > 0:
-        ang = (u - 14.0) * 3.1
-        settle = sstep(18.6, 19.6, u)
-        ang = ang * (1 - settle * 0.85)
-        Pc, Nc = spinning_coin(150000, 0.72, 0.045, rng)
-        Rm = rot_y(ang * 0.55) @ rot_x(ang)
-        Pc = Pc @ Rm.T + np.array([0.35, 0.05, 0], F32)
-        Nc = Nc @ Rm.T
-        lights = [((2.2, 2.6, 3.2), ICE, 2.1), ((-2.4, -1.2, 1.4), AMBER, 0.55)]
-        cc = shade(Pc, Nc, CYAN * 0.28 + WHITE * 0.06, lights, cam.eye, amb=0.03,
-                   rim=0.55, spec=0.9, shin=70)
-        r = np.linalg.norm(Pc[:, :2], axis=1)
-        eng = np.exp(-((r - 0.52) / 0.018) ** 2)[:, None]
-        cc = cc + eng * ICE * 0.55
-        S.dots(Pc, cc, 0.48 * coin_a, blur=0.9)
-        fl = sstep(19.25, 19.35, u) * (1 - sstep(19.35, 20.2, u))
-        if fl > 0:
-            screen_glow(S, W * 0.5, H * 0.5, W * 0.55, ICE, 0.5 * fl)
+    stage(S, t, gx=0.62, gy=0.45, gcol=AMBER * 0.35 + TEAL * 0.65, gsize=0.30, gint=0.20)
+    rng = jitter(5)
+    R, th = 0.86, 0.10
+    spin = (u - 15.3) * 7.0
+    P0, N0 = spinning_coin(120000, R, th, rng)
+    for k, (da, en) in enumerate([(0.0, 1.0), (-0.22, 0.22), (-0.46, 0.10)]):
+        Rm = rot_y(spin + da) @ rot_x(rad(16))
+        P = P0 @ Rm.T
+        N = N0 @ Rm.T
+        col = shade(P, N, ICE * 0.42,
+                    [((2.2, 2.6, 3.0), WHITE, 2.4), ((-2.4, 0.6, 1.6), AMBER, 1.5)],
+                    cam.eye, amb=0.10, rim=0.9, spec=0.75, shin=60)
+        S.dots(P, col, en * 0.95, blur=0.85 if k == 0 else 1.8)
+    S.dots(sphere_volume(9000, 0.6, rng), AMBER, 0.10, blur=3.6)
+    dust_layer(S, t, 120, 2.6, energy=0.16)
     return S
+
 
 def ov_qubit(f, u, t, dur):
     a = fade(u, 0.4, 1.4, 7.4, 8.4)
@@ -381,10 +510,6 @@ def ov_qubit(f, u, t, dur):
              120, 668, AMBER, fade(u, 11.6, 12.3, 13.4, 14.4), glow=0.7,
              reveal=(clamp((u - 11.6) / 0.6), 80))
 
-    c = fade(u, 15.4, 16.4, 18.4, 19.0)
-    put_mask(f, text_mask("a blur of possibility", "serif_i", 62, None),
-             120, 520, ICE, c, glow=0.3)
-
     d = fade(u, 19.7, 20.4, 22.4, 23.0)
     put_mask(f, text_mask("α|0⟩ + β|1⟩", "serif", 108, None, 0.01),
              118, 470, AMBER, d, glow=0.55, reveal=(clamp((u - 19.7) / 0.5), 70))
@@ -392,57 +517,48 @@ def ov_qubit(f, u, t, dur):
              124, 620, ICE * 0.9, d * 0.8, glow=0.18)
 
 
-# ============================================================= 05. EXPLOSION
+# =============================================================== 05. EXPLODE
 def sc_explode(u, t):
-    pull = kf(u, [(0, 3.1), (5.5, 3.5), (8.2, 5.0), (9.9, 6.6)])
-    cam = Cam(W, H, eye=(kf(u, [(0, 0.35), (9.9, -0.5)]),
-                          kf(u, [(0, 0.55), (9.9, 1.05)]), pull),
+    cam = Cam(W, H, eye=(0.0, 0.10, kf(u, [(0, 4.95), (9.9, 5.70)])),
               target=(0.0, 0.0, 0.0), fov=44, roll=rad(2.5) * math.sin(u * 0.4))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.60, gy=0.46, gcol=INDIGO * 0.6 + CYAN * 0.4, gsize=0.44, gint=0.16)
     rng = jitter(5)
-    screen_glow(S, W * 0.5, H * 0.46, W * 0.40, INDIGO * 0.55 + TEAL * 0.25, 0.14)
 
-    k = clamp((u - 0.25) / 6.4)
-    n = int(min(2 ** (1 + k * 16.0), 190000))
-    n = max(n, 2)
-    P = rng.uniform(-1.0, 1.0, (n, 3)).astype(F32)
-    # the counting cage: 12 edges, always visible, gives the growth a scale
-    E = []
-    for a in (-1, 1):
-        for b in (-1, 1):
-            E.append(np.stack([np.full(240, a), np.full(240, b), np.linspace(-1, 1, 240)], 1))
-            E.append(np.stack([np.full(240, a), np.linspace(-1, 1, 240), np.full(240, b)], 1))
-            E.append(np.stack([np.linspace(-1, 1, 240), np.full(240, a), np.full(240, b)], 1))
-    E = np.concatenate(E).astype(F32)
-    S.dots(E, TEAL, 0.30, blur=1.2)
+    m = int(min(3 + (u / 9.9) * 9, 11))
+    nodes, edges = lattice(m, m, m, 2.1, 2.1, 2.1, per=12)
+    S.dots(nodes, mix(CYAN, WHITE, 0.35), 1.45, blur=0.0)
+    S.dots(edges, TEAL, 0.34, blur=0.0)
+    # a faint interior volume so the box feels full, not empty
+    n = int(1200 + 60000 * clamp((u - 0.4) / 6.0))
+    Pi = (rng.random((n, 3)) - 0.5) * 1.94
+    burst = sstep(6.9, 8.9, u)
+    R = np.linalg.norm(Pi, axis=1, keepdims=True)
+    Pi = Pi * (1.0 + burst * (1.9 * (0.30 + 0.70 * R)))
+    Pi = Pi @ rot_y(u * 0.30).T
+    d = np.linalg.norm(Pi, axis=1)
+    col = mix(CYAN, AMBER, clamp(d / 2.4) * 0.45)
+    hot = np.exp(-d * d * 0.55)
+    S.dots(Pi, col, 0.030 + 0.20 * burst + 0.03 * math.sin(u * 5.0), blur=1.0)
 
-    # burst: the cube's contents blow outward into a sphere
-    burst = sstep(6.9, 8.8, u)
-    R = np.linalg.norm(P, axis=1, keepdims=True)
-    P = P * (1.0 + burst * (1.6 * (0.35 + 0.65 * R)))
-    P = P @ rot_y(u * 0.30).T
-    d = np.linalg.norm(P, axis=1)
-    col = mix(CYAN, AMBER, clamp(d / 2.2) * 0.30)
-    hot = np.exp(-d * d * 0.5)[:, None]
-    e = 0.42 + 0.55 * hot + 0.10 * np.sin(u * 5.0)
-    S.dots(P, col, e * 0.85, blur=1.0)
     # radial filaments once exploded
-    if burst > 0.02:
-        for j in range(26):
-            th = j * TAU / 26 + 0.2
+    if burst > 0.01:
+        for j in range(30):
+            th = j * TAU / 30 + 0.2
             ph = math.sin(j * 1.7) * 0.9
-            dirv = np.array([math.cos(th) * math.cos(ph), math.sin(ph), math.sin(th) * math.cos(ph)], F32)
-            ln = np.linspace(0.2, 2.6, 380)
-            fil = dirv[None, :] * ln[:, None] + rng.normal(0, 0.012, (380, 3))
-            S.dots(fil, mix(CYAN, WHITE, 0.3), 0.55 * burst, blur=1.2)
-    S.dots(sphere_volume(9000, 0.05, rng), WHITE, 1.5, blur=2.2)
-    dust_layer(S, t, 200, 2.9)
+            dv = np.array([math.cos(th) * math.cos(ph), math.sin(ph),
+                           math.sin(th) * math.cos(ph)], F32)
+            ln = np.linspace(0.3, 2.8, 520)
+            fil = dv[None, :] * ln[:, None] + rng.normal(0, 0.02, (520, 3))
+            S.dots(fil, mix(CYAN, AMBER, 0.3), 0.55 * burst, blur=1.1)
+    S.dots(sphere_volume(4000, 0.05, rng), WHITE, 0.8, blur=1.6)
+    dust_layer(S, t, 160, 2.9, energy=0.18)
     return S
+
 
 def ov_explode(f, u, t, dur):
     a = fade(u, 0.2, 0.8, 8.8, 9.6)
     label(f, "05 / SUPERPOSITION", 120, 96, a * 0.85, 18)
-    # live counter 2^n
     n = int(1 + clamp((u - 0.2) / 6.2) * 16)
     cnt = f"2^{n}" if n < 17 else "2^300"
     put_mask(f, text_mask(cnt, "mono", 76, 300, 0.02),
@@ -457,69 +573,50 @@ def ov_explode(f, u, t, dur):
              reveal=(clamp((u - 6.9) / 0.6), 80))
 
 
-# =========================================================== 06. ENTANGLEMENT
+# ============================================================ 06. ENTANGLEMENT
 def sc_entangle(u, t):
-    ex = kf(u, [(0, 0.2), (10, 2.3), (16, -1.2), (23, 0.1)])
-    ez = kf(u, [(0, 5.2), (10, 4.2), (23, 3.7)])
-    ey = kf(u, [(0, 0.25), (10, 0.85), (23, 0.2)])
-    cam = Cam(W, H, eye=(ex, ey, ez), target=(0.0, 0.0, 0.0), fov=40,
+    ex = kf(u, [(0, 0.35), (11, 1.80), (17, -1.55), (23, 0.30)])
+    ey = kf(u, [(0, 0.30), (11, 0.85), (23, 0.28)])
+    ez = kf(u, [(0, 4.55), (11, 3.95), (23, 4.20)])
+    cam = Cam(W, H, eye=(ex, ey, ez), target=(0.0, 0.02, 0.0), fov=40,
               roll=rad(2.0) * math.sin(u * 0.35))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.50, gy=0.46, gcol=TEAL, gsize=0.42, gint=0.14)
     rng = jitter(6)
-    screen_glow(S, W * 0.5, H * 0.48, W * 0.36, INDIGO * 0.4 + CYAN * 0.2, 0.12)
-    dot_ground(cam, S, t, n=5400, y=-1.25, extent=9, col=TEAL * 0.55, energy=0.18, blur=1.8)
 
-    x = 1.55
-    A = np.array([-x, 0.0, 0.0], F32)
-    B = np.array([x, 0.0, 0.0], F32)
-    nA = 78000
-    PA = sphere_shell(nA, 0.52, 0.02, rng) + A
-    PB = sphere_shell(nA, 0.52, 0.02, rng) + B
-    lights = [((0.0, 2.6, 3.0), ICE, 1.2), ((-3.0, -1.0, 1.0), AMBER, 0.4)]
-    cA = shade(PA, norm(PA - A), CYAN * 0.6 + WHITE * 0.1, lights, cam.eye, amb=0.08, rim=1.2, spec=0.5)
-    cB = shade(PB, norm(PB - B), INDIGO * 0.55 + CYAN * 0.2, lights, cam.eye, amb=0.08, rim=1.2, spec=0.5)
-    S.dots(PA, cA, 0.58, blur=0.95)
-    S.dots(PB, cB, 0.58, blur=0.95)
+    A = np.array([-1.42, 0.0, 0.0], F32)
+    B = np.array([1.42, 0.0, 0.0], F32)
+    pul = 0.5 + 0.5 * math.sin(u * 1.6)
+    for c, base, rr in ((A, CYAN, 0.62), (B, INDIGO, 0.50)):
+        glow_ball(S, c, rr, base, energy=0.55 + 0.18 * pul, blur=1.0, n=90000)
 
-    # braided filament: three helical strands
-    tt = np.linspace(0, 1, 1400)
-    cat = bez(np.array([-x, 0, 0], F32), np.array([-0.5, 0.75, 0.4], F32),
-              np.array([0.5, 0.75, 0.4], F32), np.array([x, 0, 0], F32), tt)
-    pulse = 0.55 + 0.45 * np.sin(u * 2.2)
-    for k in range(3):
-        ph = k * TAU / 3
-        wig = 0.055 * np.stack([np.zeros_like(tt), np.sin(tt * 26 + ph + u * 2.0),
-                                np.cos(tt * 26 + ph + u * 2.0)], 1)
-        line = cat + wig
-        # densify
-        idx = rng.integers(0, len(line), 26000)
-        jj = rng.normal(0, 0.008, (26000, 3))
-        P = line[idx] + jj
-        e = 0.5 * (0.6 + 0.4 * np.sin(u * 5 - tt[idx] * 12))
-        S.dots(P, mix(TEAL, ICE, pulse * 0.5), e, blur=1.0)
-    # travelling measurement pulses
-    for k in range(2):
-        q = ((u * 0.55 + k * 0.5) % 1.0)
-        if q < 1:
-            i0 = int(q * (len(cat) - 1))
-            seg = cat[max(i0 - 4, 0):i0 + 4]
-            if len(seg) > 0:
-                S.dots(seg, WHITE, 1.0, blur=2.6)
+    # braided link
+    p1, p2, s = braid(A, B, 30000, turns=3.2, amp=0.19)
+    jitter_n = rng.normal(0, 0.008, p1.shape)
+    p1 = p1 + jitter_n; p2 = p2 + jitter_n[::-1]
+    pulse = (u * 0.55) % 1.0
+    dist = np.minimum(np.abs(s - pulse), 1 - np.abs(s - pulse))
+    e = 0.30 + 1.25 * np.exp(-(dist ** 2) / 0.0022)
+    S.dots(p1, mix(CYAN, WHITE, 0.25), e, blur=0.95)
+    S.dots(p2, mix(VIOLET, CYAN, 0.35), e[::-1] * 0.9, blur=0.95)
 
-    # measurement: one flashes, so does the other, instantly
-    m = sstep(18.6, 18.75, u) * (1 - sstep(19.8, 21.0, u))
-    if m > 0:
-        S.dots(sphere_volume(9000, 0.12, rng) + A, WHITE, 2.4 * m, blur=3.0)
-        S.dots(sphere_volume(9000, 0.12, rng) + B, WHITE, 2.4 * m, blur=3.0)
+    # distance ruler, dotted
+    y = -1.12
+    rp = np.stack([np.linspace(-2.5, 2.5, 900), np.full(900, y), np.full(900, -0.5)], 1).astype(F32)
+    S.dots(rp, TEAL * 0.8, 0.26, blur=1.2)
+    for x in np.linspace(-2.5, 2.5, 11):
+        tp = np.stack([np.full(70, x), np.full(70, y), np.linspace(-0.5, -0.38, 70)], 1).astype(F32)
+        S.dots(tp, CYAN * 0.7, 0.34, blur=1.1)
+
+    # measurement: both ends flash at once
+    if u > 18.4:
+        q = math.exp(-((u - 19.6) ** 2) / 0.09)
         for c in (A, B):
-            sw = clamp((u - 18.6) / 1.2)
-            if sw < 1:
-                rr = 0.4 + sw * 2.4
-                ring = ring3d(16000, rr, 0.012, tilt=rad(72), yaw=0.4, rng=rng) + c
-                S.dots(ring, mix(WHITE, CYAN, sw), 0.8 * (1 - sw) ** 2, blur=2.2)
-    # subtle link line at rest
-    S.dots(cat[rng.integers(0, len(cat), 6000)], TEAL, 0.16, blur=2.0)
-    dust_layer(S, t, 210, 2.9)
+            S.dots(sphere_shell(24000, 0.70, 0.02, rng) + c, WHITE, 0.9 * q, blur=1.4)
+            S.dots(sphere_volume(5000, 0.28, rng) + c, AMBER, 0.6 * q, blur=2.6)
+        mid = np.linspace(-2.2, 2.2, 700)
+        S.dots(np.stack([mid, np.full(700, 0.0), np.full(700, 0.0)], 1), ICE, 0.55 * q, blur=1.6)
+    dust_layer(S, t, 140, 2.8, energy=0.16)
     return S
 
 
@@ -543,67 +640,62 @@ def ov_entangle(f, u, t, dur):
              124, 634, AMBER, fade(u, 20.4, 21.2, 22.6, 23.2) * 0.9, glow=0.2)
 
 
-# ============================================================ 07. INTERFERENCE
+# ============================================================= 07. INTERFERENCE
 def sc_interference(u, t):
-    cam = Cam(W, H, eye=(kf(u, [(0, -0.25), (24, 0.55)]), kf(u, [(0, 0.62), (12, 0.95), (24, 0.70)]),
-                          kf(u, [(0, 2.55), (24, 2.15)])),
-              target=(kf(u, [(0, -0.15), (24, 0.25)]), kf(u, [(0, -0.10), (12, 0.05), (24, 0.15)]),
-                      kf(u, [(0, -1.9), (24, -1.5)])),
-              fov=56, roll=rad(0.8))
+    cam = Cam(W, H,
+              eye=(kf(u, [(0, -0.15), (24, 0.35)]), kf(u, [(0, 1.95), (13, 2.20), (24, 1.90)]),
+                   kf(u, [(0, 2.05), (24, 1.85)])),
+              target=(kf(u, [(0, -0.10), (24, 0.05)]), -0.62, kf(u, [(0, -1.05), (24, -0.85)])),
+              fov=50, roll=rad(0.6))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.55, gy=0.40, gcol=TEAL, gsize=0.46, gint=0.12)
     rng = jitter(7)
-    screen_glow(S, W * 0.5, H * 0.58, W * 0.50, TEAL * 0.5, 0.13)
 
-    nx, nz = 300, 220
-    P = grid3(nx, nz, sx=9.6, sz=7.4, y=0.0)
-    P[:, 2] -= 2.2
+    n = 230
+    P = floor_pts(-3.1, 3.1, -3.2, 1.5, n, n, 0.0)
     X, Z = P[:, 0], P[:, 2]
-
-    k = 3.2
-    w = 1.9
-    s1 = np.array([-1.25, 0.0, -1.0], F32)
-    s2 = np.array([1.25, 0.0, -1.0], F32)
+    s1 = np.array([-1.15, 0.0, -0.95], F32)
+    s2 = np.array([1.15, 0.0, -0.95], F32)
     r1 = np.sqrt((X - s1[0]) ** 2 + (Z - s1[2]) ** 2) + 1e-4
     r2 = np.sqrt((X - s2[0]) ** 2 + (Z - s2[2]) ** 2) + 1e-4
-    a1 = np.sin(k * r1 - w * (u + t) * 2.0) / (1 + 0.50 * r1)
-    a2 = np.sin(k * r2 - w * (u + t) * 2.0) / (1 + 0.50 * r2)
-    amp = a1 + a2
+    k = 7.4
+    w = 1.35
+    h = (np.sin(k * r1 - w * t) + np.sin(k * r2 - w * t)) * 0.5
+    env = np.exp(-(((X) ** 2 + (Z + 0.8) ** 2)) * 0.10)
+    hh = h * env
+    P[:, 1] = -0.36 + 0.20 * hh
+    crest = np.clip(np.abs(hh), 0, 1)
+    energy = 0.055 + 0.85 * crest ** 1.5
+    col = mix(TEAL * 0.55, LIME, crest ** 1.2)
+    S.dots(P, col, energy, blur=0.95)
 
-    ans = sstep(13.0, 20.0, u)
-    r3 = np.sqrt((X - 0.0) ** 2 + (Z + 0.6) ** 2) + 1e-4
-    a3 = np.sin(k * r3 - w * (u + t) * 2.0) * np.exp(-((r3 - 1.0) / 1.6) ** 2)
-    amp = amp * (1 - 0.60 * ans) + a3 * ans * 1.6
+    # emitters
+    for c, cc in ((s1, WHITE), (s2, AMBER)):
+        S.dots(sphere_shell(3000, 0.030, 0.0, rng) + c, cc, 0.85, blur=0.0)
+        S.dots(sphere_volume(2000, 0.16, rng) + c, cc, 0.08, blur=2.4)
+    # expanding rings from each source
+    for j in range(2):
+        rad0 = (t * 0.55 + j * 0.9) % 2.6
+        for c, cc in ((s1, CYAN), (s2, AMBER)):
+            th = np.linspace(0, TAU, 700)
+            ring = np.stack([c[0] + rad0 * np.cos(th), np.full(700, -0.35), c[2] + rad0 * np.sin(th)], 1)
+            e = 0.35 * math.exp(-rad0 * 0.7)
+            S.dots(ring, cc, e, blur=1.4)
 
-    col_a = sstep(18.0, 21.0, u)
-    P[:, 1] = amp * 0.06 * (1 - col_a)
-    energy = (np.abs(amp) ** 1.5) * 1.5 + 0.05
-    energy = energy * (0.55 + 0.45 * (1 - col_a))
-    col = mix(TEAL, mix(CYAN, AMBER, clamp(np.abs(amp) * 0.6)), 0.35)
-    S.dots(P, col, energy, blur=1.05)
-
-    # the two emitters
-    for s in (s1, s2):
-        S.dots(sphere_volume(2200, 0.055, rng) + s, WHITE, 1.2, blur=2.2)
-        S.dots(sphere_volume(900, 0.10, rng) + s, TEAL, 0.35, blur=3.2)
-    if ans > 0.02:
-        S.dots(sphere_volume(2600, 0.06, rng) + np.array([0, 0.02, -0.6], F32),
-               AMBER, 1.4 * ans, blur=2.2)
-
-    if col_a > 0.01:
-        n = 70000
-        h = 3.8
-        yy = rng.random(n) ** 0.75 * h
-        ang = rng.random(n) * TAU
-        rr = (0.035 + 0.03 * np.exp(-yy)) * (0.3 + 0.7 * rng.random(n))
-        CP = np.stack([np.cos(ang) * rr, yy - 0.05, -0.6 + np.sin(ang) * rr], 1)
-        e = (1.0 - yy / h) ** 0.75 * (0.75 + 0.25 * math.sin(u * 3))
-        S.dots(CP, mix(AMBER, ICE, clamp(yy / h)), e * col_a * 1.0, blur=1.0)
-        RP = CP.copy(); RP[:, 1] *= -0.55
-        S.dots(RP, TEAL, e * col_a * 0.20, blur=2.8)
-    hz = np.stack([np.linspace(-8, 8, 900), np.full(900, 0.01), np.full(900, -6.6)], 1)
-    S.dots(hz, TEAL, 0.16, blur=1.8)
-    dust_layer(S, t, 240, 3.0, energy=0.24)
+    # second half: the constructive column stands up
+    q = sstep(11.5, 15.0, u)
+    if q > 0.01:
+        colp = np.stack([np.full(1400, 0.0), np.linspace(-0.4, 1.5, 1400),
+                         np.full(1400, -0.95)], 1).astype(F32)
+        S.dots(colp, LIME, 0.75 * q, blur=1.1)
+        S.dots(sphere_shell(30000, 0.09, 0.01, rng) + np.array([0.0, 1.55, -0.95], F32),
+               WHITE, 1.8 * q, blur=1.0)
+        # antinode markers along the centre
+        for zz in np.linspace(-2.2, 1.2, 9):
+            S.dots(np.array([[0.0, -0.30, zz]], F32), LIME, 0.9 * q, blur=1.2)
+    dust_layer(S, t, 150, 2.9, energy=0.15)
     return S
+
 
 def ov_interf(f, u, t, dur):
     a = fade(u, 0.5, 1.5, 10.0, 11.0)
@@ -628,235 +720,285 @@ def ov_interf(f, u, t, dur):
 
 # ============================================================= 08. DECOHERENCE
 def sc_decohere(u, t):
-    cam = Cam(W, H, eye=(kf(u, [(0, 0.1), (24, 1.2)]), kf(u, [(0, 0.55), (24, 0.25)]),
-                          kf(u, [(0, 3.5), (24, 3.9)])),
-              target=(0.0, 0.0, 0.0), fov=42, roll=rad(1.8) * math.sin(u * 0.3))
+    cam = Cam(W, H, eye=(kf(u, [(0, 0.20), (25, 1.05)]), kf(u, [(0, 0.32), (25, 0.20)]),
+                          kf(u, [(0, 3.85), (25, 4.05)])),
+              target=(-0.55, 0.0, 0.0), fov=42, roll=rad(1.5) * math.sin(u * 0.28))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.64, gy=0.46, gcol=CYAN, gsize=0.36, gint=0.16)
     rng = jitter(8)
-    screen_glow(S, W * 0.5, H * 0.5, W * 0.28, INDIGO * 0.35 + CYAN * 0.3, 0.16)
 
-    # cryostat: three concentric rings
-    for i, (R, tilt, ph) in enumerate([(1.55, 78, 0.0), (1.95, 62, 1.0), (2.35, 88, 2.0)]):
-        ring = ring3d(34000, R, 0.014, tilt=rad(tilt) + 0.06 * math.sin(u * 0.4 + ph),
-                      yaw=u * 0.18 * (1 if i % 2 == 0 else -1) + ph, rng=rng)
-        e = 0.30 + 0.10 * math.sin(u * 0.8 + ph)
-        S.dots(ring, TEAL * 0.9, e, blur=1.0)
-    # cold fog particles
-    fogp = sphere_volume(26000, 2.2, rng)
-    fogp[:, 1] *= 0.55
-    S.dots(fogp, INDIGO * 0.5, 0.05, blur=3.2)
+    collapse = sstep(7.2, 9.2, u)
+    s = 1.0 - 0.90 * collapse
+    hot = collapse ** 2
+    base_col = mix(CYAN, RED, hot)
 
-    # the computing core
-    core = sphere_shell(52000, 0.42, 0.012, rng)
-    core = core @ rot_y(u * 0.5).T
-    core_c = shade(core, norm(core), CYAN * 0.55 + WHITE * 0.15,
-                   [((1.2, 2.2, 2.0), ICE, 1.3), ((-1.4, -0.8, 0.6), AMBER, 0.35)],
-                   cam.eye, amb=0.10, rim=1.2, spec=0.6)
-    S.dots(core, core_c, 0.62, blur=0.95)
-    S.dots(sphere_volume(3500, 0.04, rng), WHITE, 1.3, blur=2.2)
+    # orbit rings, tucked inside the frame
+    for j, tilt in enumerate((rad(72), rad(24), rad(-48))):
+        R = 1.05 * (1.0 - 0.55 * collapse)
+        orb = ring3d(7000, R, 0.006, tilt=tilt, yaw=u * (0.35 + 0.1 * j) + j * 1.7, rng=rng)
+        S.dots(orb, mix(base_col, AMBER, 0.30 * j), 0.26 * (1 - 0.5 * collapse), blur=0.0)
 
-    # heat intrudes: amber sparks with trails
-    for k in range(7):
-        phase = (u * 0.42 + k * 0.137) % 1.0
-        # deterministic impact beat
-        beat = 3.6 + k * 2.9
-        if 0.4 < phase < 0.62:
-            q = (phase - 0.4) / 0.22
-            start = np.array([2.8 * math.cos(k * 2.1), 1.4 * math.sin(k * 1.7), 1.2], F32)
-            end = np.array([0.5 * math.cos(k * 1.3), 0.35 * math.sin(k * 1.1), 0.2], F32)
-            p = start * (1 - q) + end * q
-            trail = p[None, :] + np.linspace(-1, 0, 200)[:, None] * (start - end)[None, :] * 0.09
-            S.dots(trail, AMBER, (0.5 + 0.5 * q) * 1.0, blur=1.4)
-            S.dots(p[None, :], WHITE, 1.4, blur=2.0)
-            if q > 0.92:
-                # impact: scatter a patch of the core
-                h = int(u * 3.0) + k
-                rr = np.random.default_rng(h)
-                patch = core[np.linalg.norm(core - end, axis=1) < 0.30]
-                if len(patch):
-                    patch = patch + rr.normal(0, 0.028, patch.shape)
-                    S.dots(patch, AMBER, 1.1, blur=1.8)
-        # aftermath glow
-        for kk in range(3):
-            imp_t = 3.6 + kk * 2.9
-            if 0 < u - imp_t < 1.2:
-                q = (u - imp_t) / 1.2
-                c = np.array([0.5 * math.cos(kk * 1.3), 0.35 * math.sin(kk * 1.1), 0.2], F32)
-                ring = ring3d(9000, 0.15 + q * 1.2, 0.01, tilt=rad(70), yaw=0.5, rng=rng) + c
-                S.dots(ring, AMBER, 0.55 * (1 - q) ** 2, blur=2.2)
+    # the qubit itself
+    R0 = 0.80 * s
+    if R0 > 0.02:
+        glow_ball(S, (0.0, 0.0, 0.0), R0, base_col, energy=0.65 + 0.3 * hot, blur=0.95,
+                  n=max(int(90000 * max(s, 0.05)), 8000))
+    # the point it collapses into
+    S.dots(sphere_shell(9000, 0.035 + 0.02 * hot, 0.0, rng), WHITE, 2.2 * collapse + 0.4, blur=0.8)
 
-    # error correction: a lattice of cells that lights up and repairs
-    ec = sstep(17.0, 19.0, u)
-    if ec > 0:
-        gx, gy = 9, 7
-        cell = np.zeros((gx * gy, 3), F32)
-        cell[:, 0] = (np.arange(gx * gy) % gx - gx / 2) * 0.42
-        cell[:, 1] = (np.arange(gx * gy) // gx - gy / 2) * 0.42
-        cell[:, 2] = -0.9
-        on = (np.sin(u * 2.0 + np.arange(len(cell)) * 0.7) > 0.2).astype(F32) * ec
-        S.dots(cell, MINT, 0.35 + 0.5 * on, blur=1.2)
-        edges = np.stack([np.minimum(cell[:, 0] % 0.42, 0.42 - cell[:, 0] % 0.42),
-                          np.minimum(cell[:, 1] % 0.42, 0.42 - cell[:, 1] % 0.42)], 1)
-        S.dots(cell[on > 0.5], MINT, 0.9, blur=1.6)
-    dust_layer(S, t, 180, 3.0, energy=0.20)
+    # shockwave
+    if 0.02 < collapse < 1.0:
+        rr = 1.0 + 1.9 * collapse
+        th = np.linspace(0, TAU, 1200)
+        ring = np.stack([rr * np.cos(th), np.zeros(1200), rr * np.sin(th)], 1).astype(F32)
+        S.dots(ring, AMBER, 0.9 * (1 - collapse) ** 1.6, blur=2.0)
+
+    # error-correction cage after the collapse
+    q = sstep(9.0, 11.0, u)
+    if q > 0.01:
+        nodes, edges = lattice(5, 5, 5, 1.0, 1.0, 1.0, per=22)
+        S.dots(edges, AMBER, 0.42 * q, blur=1.1)
+        S.dots(nodes, ICE * 0.9, 0.7 * q, blur=0.9)
+        for k in range(6):
+            a = u * 0.6 + k * 1.05
+            r = 0.62
+            p = np.array([r * math.cos(a), 0.25 * math.sin(a * 1.7), r * math.sin(a)], F32)
+            S.dots(sphere_shell(2500, 0.025, 0.0, rng) + p, CYAN, 0.9 * q, blur=1.0)
+    dust_layer(S, t, 150, 2.8, energy=0.16)
     return S
 
 
 def ov_decohere(f, u, t, dur):
     a = fade(u, 0.5, 1.5, 8.0, 9.0)
     label(f, "08 / DECOHERENCE", 120, 96, a * 0.85, 18)
-    put_mask(f, text_mask("the moment you look", "grot", 78, 300, -0.02),
+    put_mask(f, text_mask("the moment you look", "grot", 72, 300, -0.02),
              120, 452, WHITE, a, glow=0.4, reveal=(clamp((u - 0.5) / 0.8), 80))
-    put_mask(f, text_mask("it collapses.", "grot", 78, 500, -0.02),
-             120, 540, AMBER, fade(u, 2.6, 3.4, 8.0, 9.0), glow=0.5,
-             reveal=(clamp((u - 2.6) / 0.8), 80))
-    # temperature readout
-    b = fade(u, 9.4, 10.6, 16.0, 17.2)
-    temp = kf(u, [(9.4, 300.0), (14.0, 15.0)])
-    put_mask(f, text_mask(f"{temp:05.1f} mK", "mono", 96, 300, 0.02),
-             120, 430, ICE, b, glow=0.5)
+    put_mask(f, text_mask("it collapses.", "grot", 96, 600, -0.03),
+             120, 520, WHITE, fade(u, 3.4, 4.2, 8.0, 9.0), glow=0.55,
+             reveal=(clamp((u - 3.4) / 0.7), 90))
+    put_mask(f, text_mask("superposition is fragile", "mono", 20, 400, 0.10),
+             124, 646, CYAN * 0.85, fade(u, 4.6, 5.4, 8.0, 9.0) * 0.8, glow=0.15)
+
+    b = fade(u, 12.2, 13.0, 19.4, 20.4)
+    put_mask(f, text_mask("0.0476 mK", "mono", 60, 500, 0.02),
+             120, 452, CYAN, b * 0.95, glow=0.4)
     put_mask(f, text_mask("colder than deep space", "mono", 20, 400, 0.10),
-             124, 540, CYAN, b * 0.85, glow=0.18)
-    c = fade(u, 17.6, 18.6, 24.0, 24.8)
-    put_mask(f, text_mask("fragile", "grot", 120, 300, -0.03),
-             120, 470, WHITE, c * 0.9, glow=0.45, reveal=(clamp((u - 17.6) / 0.8), 90))
-    put_mask(f, text_mask("error correction eats most of the machine", "mono", 19, 400, 0.05),
-             124, 610, AMBER, fade(u, 19.0, 20.0, 24.0, 24.8) * 0.85, glow=0.15)
+             124, 540, ICE * 0.75, b * 0.8, glow=0.15)
+    c = fade(u, 15.2, 16.2, 19.4, 20.4)
+    put_mask(f, text_mask("fragile", "serif_i", 92, None),
+             120, 600, AMBER, c, glow=0.4)
+    put_mask(f, text_mask("error correction eats most of the machine", "mono", 20, 400, 0.05),
+             124, 690, ICE * 0.75, fade(u, 16.4, 17.2, 19.4, 20.4) * 0.8, glow=0.15)
 
 
-# ============================================================ 09. APPLICATIONS
+# =================================================================== 09. APPLICATIONS
 def sc_apps(u, t):
-    # three 5.67 s vignettes
     seg = int(u // 5.67)
     v = u - seg * 5.67
-    cam = Cam(W, H, eye=(0.55 * math.sin(u * 0.25), 0.22, 3.4), target=(0, 0, 0), fov=42,
-              roll=rad(1.2) * math.sin(u * 0.5))
+    ez = (4.05, 4.35, 4.10)[min(seg, 2)]
+    cam = Cam(W, H, eye=(kf(v, [(0, 0.55), (5.0, -0.75)]) * (1.0 if seg != 1 else 0.4),
+                         0.26, ez),
+              target=(0.0, 0.0, 0.0), fov=42, roll=rad(1.2) * math.sin(u * 0.5))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.62, gy=0.46, gcol=CYAN, gsize=0.34, gint=0.18,
+          floor=dict(n=7000, y=-1.15, extent=8.0, col=TEAL * 0.5, energy=0.14, blur=1.8))
     rng = jitter(9 + seg)
-    screen_glow(S, W * 0.5, H * 0.5, W * 0.32, CYAN * 0.45, 0.10)
-    dot_ground(cam, S, t, n=4200, y=-1.05, extent=8, col=TEAL * 0.5, energy=0.16, blur=1.8)
 
     if seg == 0:
-        # ---- molecule: two atom clusters, three bonds
-        A = np.array([-0.55, 0.0, 0.0], F32)
-        B = np.array([0.55, 0.0, 0.0], F32)
-        spin = u * 0.5
+        # ---- a molecule: two atom clusters, three bonds
+        A = np.array([-0.62, 0.0, 0.0], F32)
+        B = np.array([0.62, 0.0, 0.0], F32)
+        spin = u * 0.42
         Rm = rot_y(spin) @ rot_x(rad(12))
-        PA = sphere_shell(52000, 0.40, 0.02, rng) + A
-        PB = sphere_shell(40000, 0.33, 0.02, rng) + B
+        PA = sphere_shell(62000, 0.48, 0.02, rng) + A
+        PB = sphere_shell(46000, 0.38, 0.02, rng) + B
         PA = PA @ Rm.T; PB = PB @ Rm.T
-        cA = shade(PA, norm(PA - A @ Rm.T), CYAN * 0.6, [((1, 2, 2), ICE, 1.2)], cam.eye, amb=0.1, rim=1.1)
-        cB = shade(PB, norm(PB - B @ Rm.T), AMBER * 0.55, [((1, 2, 2), ICE, 1.2)], cam.eye, amb=0.1, rim=1.1)
-        S.dots(PA, cA, 0.55, blur=0.95); S.dots(PB, cB, 0.55, blur=0.95)
+        cA = shade(PA, norm(PA - A @ Rm.T), CYAN * 0.45,
+                   [((1.2, 2.2, 2.6), ICE, 1.9), ((-2.0, 0.2, 1.0), VIOLET, 0.8)],
+                   cam.eye, amb=0.10, rim=1.2)
+        cB = shade(PB, norm(PB - B @ Rm.T), AMBER * 0.40,
+                   [((1.2, 2.2, 2.6), ICE, 1.8), ((-2.0, 0.2, 1.0), AMBER, 0.9)],
+                   cam.eye, amb=0.10, rim=1.2)
+        S.dots(PA, cA, 0.62, blur=0.95); S.dots(PB, cB, 0.62, blur=0.95)
         for k in range(3):
             ph = k * TAU / 3 + 0.4
-            off = np.array([0, 0.16 * math.sin(ph), 0.16 * math.cos(ph)], F32)
-            bond = tube(np.stack([A @ Rm.T + off, B @ Rm.T + off]), 14000, 0.012, rng)
-            S.dots(bond, TEAL, 0.45, blur=1.1)
+            off = np.array([0, 0.19 * math.sin(ph), 0.19 * math.cos(ph)], F32)
+            bond = tube(np.stack([A @ Rm.T + off, B @ Rm.T + off]), 16000, 0.016, rng)
+            S.dots(bond, TEAL, 0.55, blur=1.05)
     elif seg == 1:
-        # ---- cryptography: a lattice cube that a key pierces
-        n = 110000
-        P = (rng.random((n, 3)) - 0.5) * 2.0
-        # snap to edges of a cube lattice
-        q = np.round(P * 2.0) / 2.0
-        pick = rng.random(n) < 0.55
-        P[pick] = q[pick] * 0.85
-        Rm = rot_y(u * 0.55) @ rot_x(rad(18) + 0.15 * math.sin(u * 0.7))
-        P = P @ Rm.T
-        d = np.abs(P).max(1)
-        S.dots(P, mix(TEAL, CYAN, clamp(d)), 0.42, blur=1.0)
-        # key: a bright rod through the middle
-        key = tube(np.stack([np.array([-1.3, 0, 0], F32), np.array([1.35, 0, 0], F32)]), 24000, 0.014, rng)
-        key = key @ Rm.T
-        S.dots(key, AMBER, 0.85, blur=1.0)
-        # shatter near the end of the beat
-        sh = sstep(4.0, 5.4, u - 5.67)
-        if sh > 0:
-            P2 = P * (1 + 0.35 * sh)
-            S.dots(P2, AMBER, 0.35 * sh, blur=1.4)
+        # ---- cryptography: an amber key against a lattice wall
+        spin = u * 0.30
+        Rm = rot_y(rad(-26) + 0.25 * math.sin(spin)) @ rot_x(rad(6))
+        # the wall: a square grid of dotted lines, edge to edge
+        g = 4.1
+        xs = np.linspace(-g * 0.5, g * 0.5, 15)
+        nline = 128
+        wall = []
+        for y in xs:
+            wall.append(np.stack([np.linspace(xs[0], xs[-1], nline), np.full(nline, y),
+                                  np.zeros(nline)], 1))
+        for x in xs:
+            wall.append(np.stack([np.full(nline, x), np.linspace(xs[0], xs[-1], nline),
+                                  np.zeros(nline)], 1))
+        wall = np.concatenate(wall).astype(F32)
+        wall = wall - np.array([0.0, 0.0, 0.55], F32)
+        wall = wall @ Rm.T
+        nw = F32(min(1.0, 0.30 + 0.55 * sstep(0.0, 1.2, v)))
+        S.dots(wall, mix(TEAL * 0.85, CYAN, 0.45), 0.42 * nw, blur=0.0)
+
+        # the key: bow ring, shaft, two teeth — one continuous warm object
+        K = np.array([0.62, 0.12, 0.55], F32)
+        kR = rot_y(rad(8) + 0.06 * math.sin(spin * 0.7)) @ rot_z(rad(-6))
+        key = []
+        # the bow is a flat washer: uniformly filled annulus with a real hole
+        na = 5200
+        aa = rng.random(na) * TAU
+        inner = (0.235 - 0.028) ** 2
+        outer = (0.235 + 0.028) ** 2
+        rr = np.sqrt(rng.uniform(inner, outer, na))
+        bow = np.stack([rr * np.cos(aa), rr * np.sin(aa),
+                        rng.normal(0, 0.004, na)], 1).astype(F32)
+        key.append(bow + np.array([-0.52, 0.30, 0.0], F32))
+        key.append(tube(np.stack([np.array([-0.30, 0.28, 0.0], F32),
+                                  np.array([0.72, 0.10, 0.0], F32)]), 16000, 0.016, rng))
+        for k, (tx, ty) in enumerate(((0.34, -0.10), (0.52, -0.17))):
+            key.append(tube(np.stack([np.array([tx, 0.13 - 0.045 * k, 0.0], F32),
+                                      np.array([tx, ty, 0.0], F32)]), 2600, 0.012, rng))
+        key = np.concatenate(key).astype(F32) * 1.32
+        key = key - np.array([0.06, 0.06, 0.0], F32) @ kR.T
+        key = key @ kR.T + K
+        # light it from upper-left, so the key reads as a solid lit object
+        kn = norm(key - K)
+        kc = shade(key, kn, AMBER * 0.30,
+                   [((K[0] - 1.4, K[1] + 2.2, K[2] + 1.9), ICE, 2.2),
+                    ((K[0] + 2.2, K[1] - 0.6, K[2] + 1.2), AMBER, 1.3)],
+                   cam.eye, amb=0.10, rim=0.85, spec=0.9, shin=80)
+        S.dots(key, kc, 0.85, blur=0.0)
+        # a soft glint inside the bow's hole
+        S.dots(sphere_shell(1400, 0.028, 0.0, rng)
+               + np.array([0.62 - 0.52 * 1.32 * 0.86, 0.12 + 0.30 * 1.32 * 0.86, 0.55], F32),
+               ICE, 0.35, blur=1.6)
+        # a slow wave of light crossing the wall
+        wv = sstep(2.6, 4.4, v)
+        if wv > 0:
+            band = np.abs(wall[:, 1] - (1.4 - 2.8 * wv)) < 0.10
+            S.dots(wall[band], AMBER, 0.55 * (1 - abs(wv - 0.5) * 1.4), blur=1.0)
     else:
-        # ---- optimisation: a cost landscape with a descending point
-        nx, nz = 120, 90
-        P = grid3(nx, nz, 5.0, 4.0, 0.0)
+        # ---- optimisation: a cost landscape with a descending probe
+        P = floor_pts(-2.8, 2.8, -2.3, 2.1, 170, 140, 0.0)
         X, Z = P[:, 0], P[:, 2]
-        h = (0.55 * np.exp(-((X - 1.1) ** 2 + (Z + 0.4) ** 2) * 1.8)
-             + 0.8 * np.exp(-((X + 0.9) ** 2 + (Z - 0.7) ** 2) * 1.3)
-             + 0.22 * np.sin(X * 2.4) * np.cos(Z * 2.0))
-        P[:, 1] = h - 0.55
-        col = mix(TEAL, AMBER, clamp(h / 1.2))
-        S.dots(P, col, 0.30 + 0.35 * clamp(h), blur=1.1)
-        # the descending probe
-        q = ease_io(clamp((v - 0.4) / 3.4))
-        px = lerp(-1.6, 1.1, q)
-        pz = lerp(1.2, -0.4, q)
-        ph = (0.55 * math.exp(-((px - 1.1) ** 2 + (pz + 0.4) ** 2) * 1.8)
-              + 0.8 * math.exp(-((px + 0.9) ** 2 + (pz - 0.7) ** 2) * 1.3)
-              + 0.22 * math.sin(px * 2.4) * math.cos(pz * 2.0)) - 0.55
-        probe = sphere_volume(4000, 0.05, rng) + np.array([px, ph + 0.35 + 0.5 * (1 - q), pz], F32)
-        S.dots(probe, WHITE, 1.2, blur=2.0)
-        trail = np.stack([px + rng.normal(0, 0.02, 1200), ph + 0.35 + rng.normal(0, 0.15, 1200),
-                          pz + rng.normal(0, 0.02, 1200)], 1)
-        S.dots(trail, CYAN, 0.5, blur=2.2)
-    dust_layer(S, t, 190, 2.9, energy=0.22)
+        h = (0.62 * np.exp(-((X - 1.05) ** 2 + (Z + 0.35) ** 2) * 1.7)
+             + 0.92 * np.exp(-((X + 0.85) ** 2 + (Z - 0.65) ** 2) * 1.25)
+             + 0.20 * np.sin(X * 2.4) * np.cos(Z * 2.0))
+        P[:, 1] = h - 0.70
+        col = mix(TEAL * 0.8, AMBER, clamp(h / 1.25))
+        S.dots(P, col, 0.20 + 0.50 * clamp(h), blur=1.05)
+        # probe: descends the gradient and leaves a bright trail
+        q = ease_io(clamp(v / 4.6))
+        px = lerp(-0.2, 0.95, q); pz = lerp(-0.5, -0.35, q)
+        ph = (0.62 * math.exp(-((px - 1.05) ** 2 + (pz + 0.35) ** 2) * 1.7)
+              + 0.92 * math.exp(-((px + 0.85) ** 2 + (pz - 0.65) ** 2) * 1.25))
+        ppos = np.array([px, ph - 0.55, pz], F32)
+        S.dots(sphere_shell(22000, 0.06, 0.0, rng) + ppos, WHITE, 2.0, blur=0.9)
+        tr = np.linspace(0, 1, 900)
+        tp = np.stack([lerp(-0.2, px, tr), np.full(900, ph - 0.55),
+                       lerp(-0.5, pz, tr)], 1)
+        S.dots(tp.astype(F32), AMBER, 0.45, blur=1.3)
+    dust_layer(S, t, 130, 2.7, energy=0.15)
     return S
 
 
 def ov_apps(f, u, t, dur):
-    seg = int(u // 5.67)
-    v = u - seg * 5.67
-    a = fade(v, 0.15, 0.7, 4.6, 5.3)
+    a = fade(u, 0.5, 1.6, 5.0, 5.8)
     label(f, "09 / APPLICATIONS", 120, 96, a * 0.85, 18)
-    titles = [("molecules", "new drugs, designed atom by atom"),
-              ("cryptography", "break it — then rebuild it"),
-              ("optimisation", "find the lowest point in a vast landscape")]
-    big, sub = titles[min(seg, 2)]
-    put_mask(f, text_mask(big, "grot", 104, 300, -0.025),
-             120, 430, WHITE, a, glow=0.45, reveal=(clamp((v - 0.15) / 0.7), 90))
-    put_mask(f, text_mask(sub, "mono", 20, 400, 0.06),
-             124, 560, CYAN * 0.9, fade(v, 0.8, 1.6, 4.6, 5.3) * 0.85, glow=0.18)
-    idx = f"0{seg + 1}"
-    put_mask(f, text_mask(idx, "mono", 20, 300, 0.10),
-             1720, 96, ICE * 0.6, a * 0.7, glow=0.1)
+    put_mask(f, text_mask("materials.", "grot", 86, 500, -0.02),
+             120, 480, WHITE, a, glow=0.45, reveal=(clamp((u - 0.5) / 0.7), 80))
+    put_mask(f, text_mask("new molecules, designed not discovered", "mono", 20, 400, 0.05),
+             124, 570, CYAN * 0.85, a * 0.8, glow=0.15)
+
+    b = fade(u, 6.2, 7.2, 10.7, 11.5)
+    put_mask(f, text_mask("cryptography.", "grot", 86, 500, -0.02),
+             120, 480, WHITE, b, glow=0.45, reveal=(clamp((u - 6.2) / 0.7), 80))
+    put_mask(f, text_mask("a key that cannot be copied", "mono", 20, 400, 0.05),
+             124, 570, AMBER * 0.9, b * 0.8, glow=0.15)
+
+    c = fade(u, 11.9, 12.9, 16.2, 17.0)
+    put_mask(f, text_mask("optimisation.", "grot", 86, 500, -0.02),
+             120, 480, WHITE, c, glow=0.45, reveal=(clamp((u - 11.9) / 0.7), 80))
+    put_mask(f, text_mask("find the lowest point in a vast landscape", "mono", 20, 400, 0.05),
+             124, 570, CYAN * 0.85, c * 0.8, glow=0.15)
 
 
-# ================================================================ 10. SHADOW
+# ==================================================================== 10. SHADOW
 def sc_shadow(u, t):
-    cam = Cam(W, H, eye=(kf(u, [(0, -1.7), (18, 1.9)]), kf(u, [(0, 0.55), (18, 0.35)]),
-                          kf(u, [(0, 3.0), (18, 3.6)])),
-              target=(0.0, kf(u, [(0, 0.55), (18, 0.30)]), 0.0), fov=44,
-              roll=rad(1.5) * math.sin(u * 0.3))
+    cam = Cam(W, H,
+              eye=(kf(u, [(0, 0.05), (19, 0.40)]), kf(u, [(0, 1.68), (19, 1.38)]),
+                   kf(u, [(0, 4.75), (19, 4.35)])),
+              target=(kf(u, [(0, 0.20), (19, 0.45)]), kf(u, [(0, -0.62), (19, -0.52)]), 0.0),
+              fov=44, roll=rad(1.2) * math.sin(u * 0.3))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.66, gy=0.36, gcol=AMBER * 0.40 + TEAL * 0.60, gsize=0.34, gint=0.18)
     rng = jitter(10)
-    screen_glow(S, W * 0.5, H * 0.34, W * 0.36, CYAN * 0.35, 0.12)
 
-    # the quantum world above: a luminous structure
-    n = 150000
-    P = sphere_shell(n, 0.95, 0.02, rng)
-    P[:, 1] *= 0.55
-    P = P @ rot_y(u * 0.3).T
-    P[:, 1] += 1.25
-    c = shade(P, norm(P - np.array([0, 1.25, 0], F32)), CYAN * 0.55 + WHITE * 0.1,
-              [((1.6, 3.2, 2.2), ICE, 1.2)], cam.eye, amb=0.08, rim=1.2, spec=0.5)
-    S.dots(P, c, 0.55, blur=0.95)
-    # rings above
-    for k in range(2):
-        R = ring3d(30000, 1.3 + k * 0.35, 0.01, tilt=rad(74 - k * 10), yaw=u * 0.25 * (1 + k), rng=rng)
-        R[:, 1] += 1.2
-        S.dots(R, TEAL, 0.35, blur=1.1)
+    C = np.array([0.62, 0.48, 0.0], F32)
+    rs = 0.60
+    L = np.array([-1.20, 3.60, 1.40], F32)
+    yfloor = -1.05
 
-    # the classical world below: its reflection, dimmer and desaturated
-    Rp = P.copy(); Rp[:, 1] = -Rp[:, 1] + 0.02
-    S.dots(Rp, mix(TEAL, INDIGO * 0.6, 0.5), 0.16, blur=2.6)
-    for k in range(2):
-        R = ring3d(22000, 1.3 + k * 0.35, 0.01, tilt=rad(74 - k * 10), yaw=u * 0.25 * (1 + k), rng=rng)
-        R[:, 1] = -R[:, 1] + 0.02 + 2.4
-        S.dots(R, TEAL * 0.6, 0.10, blur=3.0)
+    s = (L[1] - yfloor) / max(L[1] - C[1], 1e-3)
+    sc = L + s * (C - L)
+    srad = rs * s * 0.58
 
-    # dotted floor = the mirror
-    floor = grid3(90, 70, 9, 8, 0.0)
-    d = np.abs(floor[:, 2])
-    S.dots(floor, TEAL * 0.5, 0.10 * np.clip(1 - d / 8, 0.05, 1), blur=1.8)
-    dust_layer(S, t, 220, 2.8, energy=0.24)
+    # dotted floor with a penumbra hole where the sphere's shadow falls
+    P = floor_pts(-4.4, 4.4, -4.2, 2.8, 250, 210, yfloor)
+    dx = P[:, 0] - sc[0]; dz = P[:, 2] - sc[2]
+    dist = np.sqrt(dx * dx + dz * dz)
+    pen = np.clip((dist - srad * 0.80) / (srad * 0.75), 0.0, 1.0)
+    keep = pen > 0.02
+    P = P[keep]; pen = pen[keep]; dist = dist[keep]
+    d = cam.depth(P)
+    e = 0.46 * np.clip(1.0 - (d - 1.0) / 9.5, 0.05, 1.0)
+    edge = (np.clip(1.0 - (np.abs(P[:, 0]) / 4.4) ** 2, 0, 1)
+            * np.clip(1.0 - ((P[:, 2] + 0.7) / 3.5) ** 2, 0, 1))
+    e = e * (0.10 + 0.90 * pen) * edge ** 0.7
+    S.dots(P, mix(TEAL * 0.55, ICE * 0.9, 0.30 * pen), e, blur=1.1)
+
+    # the shadow's rim catches a little light
+    th = np.linspace(0, TAU, 1400)
+    rim = np.stack([sc[0] + srad * 0.92 * np.cos(th), np.full(1400, yfloor + 0.005),
+                    sc[2] + srad * 0.92 * np.sin(th)], 1).astype(F32)
+    S.dots(rim, AMBER, 0.30, blur=1.0)
+
+    # light shaft from the lamp
+    shaft = np.linspace(L, C, 220)
+    S.dots(shaft, AMBER * 0.7, 0.06, blur=2.4)
+    S.dots(sphere_shell(1600, 0.05, 0.0, rng) + L, WHITE, 1.2, blur=1.2)
+
+    # the quantum object
+    Pq = sphere_shell(120000, rs, 0.015, rng) + C
+    Nq = norm(Pq - C)
+    cq = shade(Pq, Nq, CYAN * 0.18,
+               [(L, AMBER, 2.6), ((-1.4, 1.2, 2.8), CYAN, 0.7)],
+               cam.eye, amb=0.08, rim=1.0, spec=1.0, shin=90)
+    S.dots(Pq, cq, 0.55 * face_energy(Nq, cam.eye, C, back=0.08), blur=0.35)
+    S.dots(sphere_volume(5000, rs * 1.5, rng) + C, CYAN * 0.6, 0.06, blur=3.2)
+
+    # second beat: the object pours down into its shadow and becomes a chip
+    q = ease_io(clamp((u - 8.6) / 6.6))
+    if q > 0.01:
+        nx, nz = 26, 18
+        chip = floor_pts(sc[0] - srad * 0.92, sc[0] + srad * 0.92,
+                         sc[2] - srad * 0.64, sc[2] + srad * 0.64, nx, nz, yfloor + 0.012)
+        pick = rng.integers(0, len(Pq), len(chip))
+        Pc = Pq[pick] * (1 - q) + chip * q
+        S.dots(Pc, mix(CYAN, AMBER, q), 0.55 + 0.45 * q, blur=0.0)
+        pins = np.concatenate([
+            np.stack([np.linspace(sc[0] - srad * 1.06, sc[0] + srad * 1.06, 500),
+                      np.full(500, yfloor + 0.012), np.full(500, sc[2] - srad * 0.76)], 1),
+            np.stack([np.linspace(sc[0] - srad * 1.06, sc[0] + srad * 1.06, 500),
+                      np.full(500, yfloor + 0.012), np.full(500, sc[2] + srad * 0.76)], 1)], 0)
+        S.dots(pins.astype(F32), AMBER, 0.45 * q, blur=0.0)
+    dust_layer(S, t, 140, 2.8, energy=0.15)
     return S
 
 
@@ -878,48 +1020,57 @@ def ov_shadow(f, u, t, dur):
              reveal=(clamp((u - 12.0) / 0.8), 80))
 
 
-# ================================================================= 11. OUTRO
+# ==================================================================== 11. OUTRO
 _PT_CACHE = {}
+
 
 def title_points():
     if "P" not in _PT_CACHE:
         rng = np.random.default_rng(31)
-        P = text_points("QUANTUM", "grot", 340, 500, tracking=0.01, n=150000, rng=rng)
-        # scale to a comfortable world size
-        P = P * 3.05
-        P[:, 1] += 0.05
-        P[:, 2] *= 2.0
+        P = text_points("QUANTUM", "grot", 340, 500, tracking=0.01, n=64000, rng=rng)
+        # width 5.46 at 1.16 => 5.0 world units, inside the 5.94 frustum
+        P = P * 1.06
+        P[:, 1] += 0.02
+        P = P - np.array([P[:, 0].mean(), P[:, 1].mean(), 0.0], F32)
         _PT_CACHE["P"] = P.astype(F32)
     return _PT_CACHE["P"]
 
 
 def sc_outro(u, t):
-    cam = Cam(W, H, eye=(0.0, 0.0, kf(u, [(0, 5.4), (7, 4.55)])),
-              target=(0.0, 0.0, 0.0), fov=38, roll=0.0)
+    cam = Cam(W, H, eye=(0.0, 0.0, kf(u, [(0, 5.25), (11.5, 4.85)])),
+              target=(0.0, 0.0, 0.0), fov=38, roll=rad(0.6) * math.sin(u * 0.4))
     S = Scene(W, H, cam)
+    stage(S, t, gx=0.50, gy=0.50, gcol=CYAN, gsize=0.44, gint=0.26)
     rng = jitter(11)
-    screen_glow(S, W * 0.5, H * 0.5, W * 0.5, CYAN * 0.25, 0.10)
     Pt = title_points()
     n = len(Pt)
-    # start as a sphere, assemble into the word
-    start = sphere_shell(n, 2.4, 0.25, rng)
-    q = ease_io(clamp((u - 0.2) / 3.4))
-    # per-particle stagger for a hand-assembled feel
+    start = sphere_shell(n, 2.05, 0.30, rng)
+
+    # final collapse: the word becomes one point
+    collapse = sstep(8.6, 9.6, u)
+    q = ease_io(clamp((u - 0.2) / 3.3))
     stag = rng.random(n) * 0.35
     qq = clamp((q - stag) / (1 - stag))[:, None]
     P = start * (1 - qq) + Pt * qq
-    # gentle drift once assembled
-    P = P + np.stack([np.sin(u * 0.7 + Pt[:, 0] * 2) * 0.012,
-                      np.sin(u * 0.9 + Pt[:, 1] * 2) * 0.012,
+    P = P + np.stack([np.sin(u * 0.7 + Pt[:, 0] * 2) * 0.010,
+                      np.sin(u * 0.9 + Pt[:, 1] * 2) * 0.010,
                       np.zeros(n, F32)], 1) * q
-    # breathing glow
-    pulse = 0.75 + 0.25 * math.sin(u * 1.6)
-    col = mix(CYAN, WHITE, 0.35 + 0.35 * np.sin(Pt[:, 0] * 1.5 + u * 0.6))
-    S.dots(P, col, (0.55 + 0.5 * q) * pulse, blur=0.95)
-    # halo behind the word
-    hz = P * 1.0
-    S.dots(hz + np.array([0, 0, -0.4], F32), TEAL, 0.10 * q, blur=4.0)
-    dust_layer(S, t, 160, 3.0, energy=0.18)
+    vgrad = clamp(0.5 + 0.85 * (Pt[:, 1] - Pt[:, 1].min())
+                  / max(Pt[:, 1].max() - Pt[:, 1].min(), 1e-3))
+    col = mix(CYAN, ICE, vgrad * 0.75)
+    e = (0.32 + 0.30 * q) * (0.88 + 0.12 * math.sin(u * 1.6))
+    if collapse > 0:
+        # shrink toward the origin but never stack every point on one pixel
+        P = P * (1.0 - 0.945 * collapse)
+        e = e * (1.0 - 0.72 * collapse)
+    S.dots(P, col, e, blur=0.95)
+    if collapse > 0.2:
+        th = np.linspace(0, TAU, 900)
+        rr = 0.25 + 2.4 * collapse
+        ring = np.stack([rr * np.cos(th), rr * np.sin(th), np.zeros(900)], 1).astype(F32)
+        S.dots(ring, CYAN, 0.30 * (1 - collapse), blur=2.2)
+        S.dots(fib_sphere(3000, 0.030 + 0.022 * collapse, 0.002, rng), ICE, 1.05, blur=0.0)
+    dust_layer(S, t, 160, 3.0, energy=0.16)
     return S
 
 
@@ -928,7 +1079,6 @@ def ov_outro(f, u, t, dur):
     put_mask(f, text_mask("a new language.", "serif_i", 54, None),
              120, 800, ICE, a * 0.95, glow=0.35)
     label(f, "11 / QUANTUM", 120, 96, fade(u, 4.0, 5.0, 10.2, 11.2) * 0.8, 18)
-    # end mark
     b = fade(u, 6.0, 7.0, 10.4, 11.4)
     put_mask(f, text_mask("how it works", "mono", 18, 400, 0.22),
              1590, 800, CYAN * 0.8, b * 0.7, glow=0.12)
@@ -944,10 +1094,6 @@ OVERLAYS = [ov_hook, ov_bits, ov_useit, ov_qubit, ov_explode, ov_entangle,
 FLASH = {2: 0.35, 4: 0.55, 8: 0.30, 10: 0.55}
 
 
-def fade(u, t0, t1, t2, t3):
-    return sstep(t0, t1, u) * (1.0 - sstep(t2, t3, u))
-
-
 def build(t):
     idx, u, u0, dur = locate(t)
     return SCENES[idx](u, t)
@@ -955,24 +1101,31 @@ def build(t):
 
 def render_scene(t, nsub=NSUB):
     acc = None
-    for tt in shutter_samples(t, FPS, nsub):
+    samples = shutter_samples(t, FPS, nsub)
+    for tt in samples:
         S = build(tt)
         img = S.compose()
         acc = img if acc is None else acc + img
-    return acc / max(len(shutter_samples(t, FPS, nsub)), 1)
+    return acc / max(len(samples), 1)
 
 
 def render_frame(t):
     img = render_scene(t, NSUB)
-    frame = finish(img, OUT_W, OUT_H, exposure=1.05, grain=0.014, vig=0.5, ca=0.0014, t=t)
+    frame = finish(img, OUT_W, OUT_H, exposure=0.98, grain=0.014, vig=0.5, ca=0.0014, t=t)
     f = frame.astype(F32) / 255.0
+
+    # cinematic text scrim: the left third sits a stop down
+    idx0 = locate(t)[0]
+    if idx0 != 10:
+        xx = np.linspace(0.0, 1.0, OUT_W, dtype=F32)[None, :]
+        scrim = 1.0 - 0.42 * np.clip((0.50 - xx) / 0.50, 0.0, 1.0) ** 1.15
+        f = f * scrim[..., None]
+
     idx, u, u0, dur = locate(t)
     OVERLAYS[idx](f, u, t, dur)
-    # cut flash
     if idx in FLASH:
         k = math.exp(-u * 26.0)
         f = f + FLASH[idx] * k
-    # section-boundary dip for the finale
     f = np.clip(f, 0, 1)
     return (f * 255.0 + 0.5).astype(np.uint8)
 

@@ -235,6 +235,7 @@ class Scene:
         self.W, self.H = W, H
         self.cam = cam
         self.layers = {}   # radius -> HxWx3 float32
+        self.base = None   # optional pre-lit background (gradient, grid)
         self.n = 0
 
     def _buf(self, r):
@@ -272,7 +273,11 @@ class Scene:
             w = e * c[:, ch] * gain
             if np.all(w == 0):
                 continue
-            flat[:, ch] += np.bincount(idx, weights=w, minlength=n).astype(F32)
+            acc = np.bincount(idx, weights=w, minlength=n).reshape(H, W).astype(F32)
+            # one-pixel halo so points read as round dots, not aliased pixels
+            acc = acc + 0.28 * (np.roll(acc, 1, 0) + np.roll(acc, -1, 0)
+                                + np.roll(acc, 1, 1) + np.roll(acc, -1, 1))
+            flat[:, ch] += acc.reshape(-1)
 
     def line_dots(self, a, b, n, col, energy=1.0, blur=0.8, gain=1.0, r=0.0):
         t = np.linspace(0, 1, n)[:, None]
@@ -280,7 +285,10 @@ class Scene:
         self.dots(P, col, energy, blur, gain)
 
     def compose(self, bloom=True, exposure=1.0):
-        out = np.zeros((self.H, self.W, 3), F32)
+        if self.base is not None:
+            out = self.base.astype(F32).copy()
+        else:
+            out = np.zeros((self.H, self.W, 3), F32)
         for r, buf in sorted(self.layers.items()):
             out += blur_rgb(buf, r)
         return out
@@ -298,7 +306,11 @@ def blur_rgb(buf, r):
     u8 = (enc * 255.0 + 0.5).astype(np.uint8)
     im = Image.fromarray(u8, "RGB").filter(ImageFilter.GaussianBlur(r))
     dec = (np.asarray(im, dtype=F32) / 255.0) ** 2
-    return dec * m
+    # Energy-preserving: a point of light keeps its total flux when defocused,
+    # which a sqrt/square gamma round-trip otherwise throws away.
+    tot = float(buf.sum())
+    ssum = float(dec.sum())
+    return dec * (tot / max(ssum, 1e-9))
 
 
 def resize_f(arr, w, h, filt=Image.BILINEAR):
@@ -348,7 +360,7 @@ def hblur_box(arr, k):
     return (cs[:, 2 * k:2 * k + W] - cs[:, :W]) / float(2 * k)
 
 
-def bloom(img, strength=0.72, thresh=0.72, streak=0.13, streak_color=(0.55, 0.85, 1.0)):
+def bloom(img, strength=0.52, thresh=0.88, streak=0.02, streak_color=(0.55, 0.85, 1.0)):
     H, W = img.shape[:2]
     hw, hh = max(W // 2, 2), max(H // 2, 2)
     small = resize_f(img, hw, hh)
