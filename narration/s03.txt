@@ -1,0 +1,1 @@
+The quantum bit is called a qubit. It can be made from one electron. An electron has a property called spin. Measure it, and you will find it pointing up, or down. Call that one and zero. But here is where intuition breaks. Before you measure it, the electron is not secretly up, and not secretly down. It is both at once. Physicists call this superposition.

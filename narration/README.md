@@ -7,7 +7,7 @@ with silence padding - never time-stretched.
 Rebuild:
 
 ```bash
-for n in s00 s01 ... s10; do
+for n in s00 s01 s02 s03 s04 s05 s06 s07 s08 s09 s10; do
   edge-tts -f narration/$n.txt -v en-US-AndrewNeural --rate=+0% \
     --write-media $n.mp3 --write-subtitles $n.vtt --no-progress
 done

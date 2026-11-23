@@ -1,0 +1,1 @@
+Here is where it gets powerful. Two classical bits hold one of four patterns. Two qubits hold all four at once. Three qubits hold eight. Add qubits, and the states do not grow. They explode. Three hundred qubits hold more states than there are atoms in the observable universe. That is not a faster laptop. That is a new kind of parallelism.

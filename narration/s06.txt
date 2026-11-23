@@ -1,0 +1,1 @@
+But superposition alone is not enough. If you measure everything, you get noise. The second resource is entanglement. Two entangled qubits share one state, no matter how far apart they sit. Measure one, and the other is decided instantly. Einstein called it spooky action at a distance. It lets a machine spread one problem across all of its qubits at once.

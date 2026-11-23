@@ -1,0 +1,1 @@
+Every computer you have used thinks in bits. Each bit is a switch. On, or off. One, or zero. Your phone holds tens of billions of them. And that was enough to put a rocket on the moon, and the internet in your pocket. But we are hitting a wall. The switches are the size of atoms now, and the classical rules stop working.
