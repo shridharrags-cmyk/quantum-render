@@ -5,7 +5,7 @@ sys.path.insert(0, "/tmp/opencode/quantum")
 import multiprocessing as mp
 
 FPS, TOTAL = 24, 4608
-OUT = "/tmp/opencode/quantum/frames"
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frames")
 
 def worker(args):
     a, b = args

@@ -12,7 +12,11 @@ jobs:
           sudo apt-get install -y -qq ffmpeg
           ffmpeg -version | head -1
       - name: Render all frames in parallel
-        run: python render_parallel.py
+        run: |
+          python render_parallel.py
+          COUNT=$(ls frames | wc -l)
+          echo "frames rendered: $COUNT / 4608"
+          if [ "$COUNT" -ne 4608 ]; then echo "::error frame count mismatch"; exit 1; fi
       - name: Encode + mux narration
         run: |
           ffmpeg -y -v error -framerate 24 -i frames/f%05d.png -i audio/narr_final.wav \
