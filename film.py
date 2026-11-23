@@ -751,7 +751,7 @@ def sc_apps(u, t):
         for k in range(3):
             ph = k * TAU / 3 + 0.4
             off = np.array([0, 0.16 * math.sin(ph), 0.16 * math.cos(ph)], F32)
-            bond = tube(np.stack([A * Rm.T + off, B * Rm.T + off]), 14000, 0.012, rng)
+            bond = tube(np.stack([A @ Rm.T + off, B @ Rm.T + off]), 14000, 0.012, rng)
             S.dots(bond, TEAL, 0.45, blur=1.1)
     elif seg == 1:
         # ---- cryptography: a lattice cube that a key pierces

@@ -257,11 +257,13 @@ class Scene:
         ix = np.clip(sx[ok].astype(np.int32), 0, W - 1)
         iy = np.clip(sy[ok].astype(np.int32), 0, H - 1)
         idx = iy.astype(np.int64) * W + ix
-        e = np.asarray(energy, F32)
-        if e.ndim:
+        e = np.asarray(energy, F32).reshape(-1)
+        if e.size == 1:
+            e = np.full(idx.shape, float(e[0]), F32)
+        elif e.size == P.shape[0] if P.ndim == 2 else 1:
             e = e[ok]
         else:
-            e = np.full(idx.shape, e, F32)
+            e = np.full(idx.shape, float(e.max()), F32)
         c = col[ok]
         buf = self._buf(float(blur))
         flat = buf.reshape(-1, 3)
