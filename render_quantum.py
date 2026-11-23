@@ -22,7 +22,10 @@ from motionlib.particles import (
 )
 
 W, H, FPS = 960, 540, 24
-TL = json.load(open("/tmp/opencode/quantum/audio/timeline.json"))
+try:
+    TL = json.load(open("audio/timeline.json"))
+except Exception:
+    TL = None
 BG = gradient(W, H, [(0.0, hsl(0.62, 0.55, 0.030)), (1.0, hsl(0.70, 0.60, 0.045))], angle=110)
 INK = np.array(hsl(0.63, 0.18, 0.93))      # near-white ink
 BLUE = np.array(hsl(0.60, 0.95, 0.60))      # primary accent
